@@ -29,14 +29,14 @@
         <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin</string>
     </dict>
 
-    <!-- Once a day at 09:00 local. render auto-collects first, so one run both
+    <!-- Once a day at 10:05 local. render auto-collects first, so one run both
          refreshes the MOC and syncs this machine's events. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>9</integer>
+        <integer>10</integer>
         <key>Minute</key>
-        <integer>0</integer>
+        <integer>5</integer>
     </dict>
 
     <!-- Wait for the schedule rather than firing the moment it's loaded. -->

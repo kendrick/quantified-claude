@@ -109,7 +109,7 @@ You don't want to run this by hand forever. On a Mac, point the installer at you
 scheduling/install.sh ~/repos/quantified-claude-events
 ```
 
-That fills in the plist template, writes the agent to `~/Library/LaunchAgents`, and loads it; logs land in `~/Library/Logs/quantified-claude/`. Edit `scheduling/com.quantified-claude.skill-usage.plist` if you want a time other than 09:00.
+That fills in the plist template, writes the agent to `~/Library/LaunchAgents`, and loads it; logs land in `~/Library/Logs/quantified-claude/`. Edit `scheduling/com.quantified-claude.skill-usage.plist` if you want a time other than 10:05.
 
 On Linux or WSL, scheduling is fussier, but you don't strictly need a scheduler: because `render` auto-collects and the whole thing is idempotent, running `render` whenever you happen to think of it counts and syncs that machine. A WSL box that participates only occasionally still shows up correctly.
 
