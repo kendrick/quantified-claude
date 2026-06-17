@@ -355,15 +355,29 @@ def parse_frontmatter(text: str) -> dict:
     return out
 
 
-def collect_inventory():
-    """Map skill-name -> {description, path} from every SKILL.md found."""
+def collect_inventory(skill_dirs=None):
+    """
+    Map skill-name -> {description, path} from every SKILL.md found.
+
+    Walks with os.walk(followlinks=True) rather than Path.rglob because the
+    personal skills under ~/.claude/skills are symlinks into a shared store
+    (~/.agents/skills). rglob won't descend through a symlinked directory — and
+    Python 3.13 made that the explicit default — so a plain rglob silently found
+    zero personal skills. os.walk(followlinks=True) follows them and behaves the
+    same across the 3.9+ range we target, where the rglob recurse_symlinks knob
+    doesn't exist.
+    """
+    if skill_dirs is None:
+        skill_dirs = SKILL_DIRS
     inventory = {}
-    for root in SKILL_DIRS:
+    for root in skill_dirs:
         if not root.exists():
             continue
-        for skill_md in root.rglob("SKILL.md"):
-            text = skill_md.read_text(encoding="utf-8", errors="replace")
-            fm = parse_frontmatter(text)
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            if "SKILL.md" not in filenames:
+                continue
+            skill_md = Path(dirpath) / "SKILL.md"
+            fm = parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
             name = fm.get("name") or skill_md.parent.name
             inventory[name] = {
                 "description": fm.get("description", ""),
