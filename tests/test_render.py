@@ -90,6 +90,19 @@ def test_moc_breaks_usage_out_into_tool_and_slash_columns():
     assert "[[speckit-plan]] | 1 | 0 | 1 |" in moc
 
 
+def test_moc_section_headings_are_title_case():
+    # The MOC is something you read, so its headings follow title case to match
+    # the rest of the docs.
+    events = [_ev("humanizer", "tool")]
+    inventory = {"humanizer": {"description": "d", "path": "/skills/humanizer/SKILL.md"}}
+
+    moc = render_moc(events, inventory, links="wikilink", out_dir=Path("/skills"))
+
+    assert "## Used & Owned" in moc
+    assert "## Owned but Never Used" in moc
+    assert "## Used but Not in Your Skills Dir" in moc
+
+
 def test_run_render_writes_a_moc_built_from_the_unioned_store(tmp_path):
     data_dir = tmp_path / "data"
     write_store(data_dir / "events" / "laptop.jsonl", [_ev("humanizer", "tool")])

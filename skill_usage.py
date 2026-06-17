@@ -529,7 +529,7 @@ def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(
         f"*Generated {now} from {len(events)} skill invocations across "
         f"{len({e['session'] for e in events})} sessions.*",
         "",
-        "## Used & owned",
+        "## Used & Owned",
         "",
         "| Skill | Uses | Tool | Slash | Last used | Description |",
         "|---|---:|---:|---:|---|---|",
@@ -541,14 +541,14 @@ def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(
             f"| {link(s)} | {counts[s]} | {tool_counts[s]} | {slash_counts[s]} | {lu} | {desc} |"
         )
 
-    lines += ["", "## Owned but never used", ""]
+    lines += ["", "## Owned but Never Used", ""]
     if owned_unused:
         for s in owned_unused:
             lines.append(f"- {link(s)} — {short(inventory[s]['description'])}")
     else:
         lines.append("*(none — you've exercised every skill in your dir)*")
 
-    lines += ["", "## Used but not in your skills dir",
+    lines += ["", "## Used but Not in Your Skills Dir",
               "*(built-in skills, plugin skills, or renamed/removed ones)*", ""]
     if used_not_owned:
         for s in used_not_owned:

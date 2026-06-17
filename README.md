@@ -11,7 +11,7 @@ Skill usage is the first thing it measures. The name is deliberately broad, so o
 A file like this (counts are real, from one machine):
 
 ```
-## Used & owned
+## Used & Owned
 
 | Skill | Uses | Tool | Slash | Last used | Description |
 |---|---:|---:|---:|---|---|
@@ -19,12 +19,12 @@ A file like this (counts are real, from one machine):
 | systematic-debugging | 15 | 15 | 0 | 2026-06-17 | Find root cause before proposing fixes |
 | brainstorming | 9 | 9 | 0 | 2026-06-17 | Use before any creative work |
 
-## Owned but never used
+## Owned but Never Used
 
 - canvas-design — Design on an infinite canvas
 - frontend-slides — Build slide decks in the browser
 
-## Used but not in your skills dir
+## Used but Not in Your Skills Dir
 *(built-in skills, plugin skills, or renamed/removed ones)*
 
 - speckit-specify — 30 uses (last 2026-06-12)
