@@ -219,6 +219,73 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     return events
 
 
+def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None = None):
+    """
+    Walk a transcripts tree and reduce it to (events, found_sessions).
+
+    Every *.jsonl under the root is one session, named by its stem (the session
+    UUID). We record the session in `found_sessions` whether or not it yielded
+    events — an eventless transcript is still "seen this run", and the overlay
+    must treat it as authoritative rather than mistaking it for a pruned session
+    whose history should be preserved.
+    """
+    fresh = []
+    found_sessions = set()
+    for jsonl in sorted(transcripts_root.rglob("*.jsonl")):
+        session = jsonl.stem
+        found_sessions.add(session)
+        records = iter_jsonl(jsonl)
+        fresh.extend(parse_events(records, session=session, host=host, since=since))
+    return fresh, found_sessions
+
+
+def read_store(path: Path) -> list:
+    """
+    Load an events store (events/<host>.jsonl) into a list of event dicts.
+
+    A missing file is an empty store, not an error: the first collect on a new
+    host has nothing to load, and render unions across hosts where some files may
+    not exist yet. Reuses iter_jsonl so a torn final line (a collect killed
+    mid-write) is skipped rather than fatal.
+    """
+    if not path.exists():
+        return []
+    return list(iter_jsonl(path))
+
+
+def store_dir(data_dir: Path) -> Path:
+    """The events/ subdir inside the private data repo. One file per host."""
+    return data_dir / "events"
+
+
+def union_stores(data_dir: Path) -> list:
+    """
+    Concatenate every host's store into the full cross-machine event set.
+
+    render builds the MOC from this union, never from a single machine's file,
+    which is why every machine's regenerated MOC reflects usage from all of them.
+    Sorted by filename for deterministic output (stable diffs when rendered).
+    """
+    events = []
+    for store in sorted(store_dir(data_dir).glob("*.jsonl")):
+        events.extend(read_store(store))
+    return events
+
+
+def write_store(path: Path, events) -> None:
+    """
+    Write events to a store file as JSONL, creating the events/ tree if needed.
+
+    One JSON object per line keeps the store diff-friendly (a new session is a
+    block of added lines, not a rewrite of the whole file) and lets read_store
+    skip a single corrupt line instead of losing the file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for event in events:
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
 def merge_events(stored, fresh, found_sessions):
     """
     Overlay this run's freshly-parsed events onto the durable store.
