@@ -55,6 +55,13 @@ SKILL_DIRS = [
 # fall back to scanning the whole input blob.
 SKILL_NAME_KEYS = ("command", "name", "skill", "skill_name", "skillName")
 
+# The slash channel: when the user types /skillname, Claude Code records it as a
+# user message whose content holds a <command-name>/skillname</command-name> tag.
+# The optional leading slash is captured-and-discarded; the inner [^<]+ stops at
+# the closing tag. We match anywhere in the string rather than anchoring, because
+# the sibling <command-message>/<command-args> tags sometimes precede it.
+COMMAND_NAME_RE = re.compile(r"<command-name>\s*/?([^<]+?)\s*</command-name>")
+
 
 # --------------------------------------------------------------------------- #
 # Transcript parsing
@@ -117,6 +124,58 @@ def record_timestamp(record: dict) -> str | None:
         if isinstance(val, str):
             return val
     return None
+
+
+def parse_events(records, session: str, host: str, since: datetime | None = None):
+    """
+    Reduce one session's transcript records into usage events.
+
+    This is the testable core of `collect`. It's deliberately decoupled from the
+    filesystem: callers hand it already-parsed JSON records plus the session id
+    and host (which the disk layout supplies), so the parsing logic can be
+    exercised against fixture lines without staging a fake ~/.claude tree.
+
+    Each event is the minimal tuple the events store needs:
+        {skill, timestamp, session, host, channel}
+
+    `project` is intentionally NOT recorded. The MOC counts by skill, never by
+    project, so it was dead weight — and it happened to encode client names
+    (the consultant-privacy leak). Dropping it deletes the liability outright
+    rather than guarding it (design doc §4).
+    """
+    events = []
+    for record in records:
+        ts = record_timestamp(record)
+        # channel="tool": the model called the Skill tool. find_tool_uses walks
+        # the record defensively because the tool_use block's depth shifts across
+        # Claude Code versions.
+        for tu in find_tool_uses(record, "Skill"):
+            events.append({
+                "skill": extract_skill_name(tu),
+                "timestamp": ts,
+                "session": session,
+                "host": host,
+                "channel": "tool",
+            })
+
+        # channel="slash": the user typed /skillname. We only trust USER messages
+        # with STRING content. That single rule rejects every false positive seen
+        # in real data: assistant prose that mentions the tag arrives as a content
+        # *list*, and tool_result echoes that quote transcript data are also lists.
+        # So a literal "<command-name>" substring outside a user+str record is
+        # always a mention, never an invocation.
+        if record.get("type") == "user":
+            content = record.get("message", {}).get("content")
+            if isinstance(content, str):
+                for name in COMMAND_NAME_RE.findall(content):
+                    events.append({
+                        "skill": name.strip(),
+                        "timestamp": ts,
+                        "session": session,
+                        "host": host,
+                        "channel": "slash",
+                    })
+    return events
 
 
 def collect_events(since: datetime | None):
