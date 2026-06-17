@@ -219,6 +219,32 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     return events
 
 
+def merge_events(stored, fresh, found_sessions):
+    """
+    Overlay this run's freshly-parsed events onto the durable store.
+
+    `found_sessions` is the set of session UUIDs actually present on disk this
+    run. For those sessions the fresh parse is authoritative, so we drop their
+    stored slice and substitute the fresh one — a wholesale replace, never an
+    append. Two properties fall out of keying on the session:
+
+      - Idempotent / self-healing. Re-reading a transcript replaces its slice
+        with an identical one, so running collect twice equals running it once.
+        There's no append seam to double-count across (the handoff's dedup fear
+        only applied to a blind append).
+      - Pruned sessions persist. A session in the store but no longer on disk is
+        simply not in `found_sessions`, so its events are carried through
+        untouched. That's what moves durability into the store and lets
+        transcripts age out (§6).
+
+    Fresh events are filtered to `found_sessions` defensively, so a caller can
+    pass the full parse without a stray session leaking past the overlay.
+    """
+    kept = [e for e in stored if e["session"] not in found_sessions]
+    overlaid = [e for e in fresh if e["session"] in found_sessions]
+    return kept + overlaid
+
+
 def collect_events(since: datetime | None):
     """Return a list of {skill, project, timestamp, session} usage events."""
     events = []
