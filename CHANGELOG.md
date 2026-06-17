@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- **skill-usage:** parse YAML block-scalar descriptions in frontmatter
 - **skill-usage:** canonicalize namespaced skill ids in the render join
 - **skill-usage:** follow symlinked skill dirs in the inventory scan
 
