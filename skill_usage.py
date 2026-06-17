@@ -342,16 +342,47 @@ def merge_events(stored, fresh, found_sessions):
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 
 
+BLOCK_SCALAR_MARKERS = {"|", ">", "|-", ">-", "|+", ">+"}
+
+
 def parse_frontmatter(text: str) -> dict:
-    """Minimal YAML-ish frontmatter parse (name + description only)."""
+    """
+    Minimal YAML-ish frontmatter parse (we only care about name + description).
+
+    Handles block scalars, because skill descriptions are routinely written as
+    `description: |` or `description: >` with the text on the following indented
+    lines. A line-at-a-time key:value split kept only the `|`/`>` marker and
+    dropped the body, so those skills showed blank descriptions in the MOC. When
+    we hit a marker we gather the indented continuation lines instead. Both block
+    styles fold to one spaced string — the MOC collapses whitespace anyway, so
+    there's no value in preserving literal newlines. A top-level key is one with
+    no leading indentation; indented lines are continuations, never new keys,
+    which also stops a colon inside the body from being misread as a key.
+    """
     m = FRONTMATTER_RE.match(text)
     if not m:
         return {}
     out = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            key, _, val = line.partition(":")
-            out[key.strip()] = val.strip().strip('"').strip("'")
+    lines = m.group(1).splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or ":" not in line or line[:1] in (" ", "\t"):
+            i += 1
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if val in BLOCK_SCALAR_MARKERS:
+            block = []
+            i += 1
+            while i < len(lines) and (not lines[i].strip() or lines[i][:1] in (" ", "\t")):
+                block.append(lines[i].strip())
+                i += 1
+            out[key] = " ".join(part for part in block if part)
+        else:
+            out[key] = val.strip('"').strip("'")
+            i += 1
     return out
 
 
