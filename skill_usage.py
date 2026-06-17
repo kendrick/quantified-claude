@@ -219,6 +219,24 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     return events
 
 
+def run_collect(transcripts_root: Path, data_dir: Path, host: str,
+                since: datetime | None = None) -> list:
+    """
+    The data flow of `collect`, with no git involved.
+
+    Read this host's existing store, parse the transcripts currently on disk,
+    overlay the re-read sessions onto the store, and write it back. Returns the
+    merged events. cmd_collect wraps this with best-effort git pull/commit/push;
+    keeping the git out here is what makes the whole pipeline unit-testable.
+    """
+    store_path = store_dir(data_dir) / f"{host}.jsonl"
+    stored = read_store(store_path)
+    fresh, found_sessions = collect_from_disk(transcripts_root, host, since)
+    merged = merge_events(stored, fresh, found_sessions)
+    write_store(store_path, merged)
+    return merged
+
+
 def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None = None):
     """
     Walk a transcripts tree and reduce it to (events, found_sessions).
