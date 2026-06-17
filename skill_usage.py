@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-skill-usage-moc.py
+skill_usage.py
 
 Builds a Map of Content (MOC) for your Claude Code skills, annotated with your
 own actual usage — counted retroactively from the session transcripts already
@@ -17,10 +17,10 @@ What it does:
        - skills you've used that aren't in your dir (built-ins, plugin skills)
 
 Usage:
-    python3 skill-usage-moc.py
-    python3 skill-usage-moc.py --out ~/vault/40-MOCs/claude-skills.md
-    python3 skill-usage-moc.py --since 2026-01-01
-    python3 skill-usage-moc.py --json            # dump raw events instead of a MOC
+    python3 skill_usage.py
+    python3 skill_usage.py --out ~/vault/40-MOCs/claude-skills.md
+    python3 skill_usage.py --since 2026-01-01
+    python3 skill_usage.py --json            # dump raw events instead of a MOC
 
 Assumes Python 3.9+. Pure stdlib, no dependencies.
 """
