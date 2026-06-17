@@ -13,6 +13,8 @@ These fixtures use the real record shapes observed in
 ~/.claude/projects/**/*.jsonl, trimmed to the fields the parser reads.
 """
 
+from datetime import datetime, timezone
+
 from skill_usage import BUILTIN_CLI_COMMANDS, parse_events
 
 
@@ -137,3 +139,61 @@ def test_default_denylist_covers_common_builtins():
     # so production `collect` filters them without the caller passing a denylist.
     for builtin in ("model", "compact", "mcp", "clear"):
         assert builtin in BUILTIN_CLI_COMMANDS
+
+
+def test_plugin_namespaced_skill_name_is_preserved_verbatim():
+    # Plugin skills carry a "plugin:skill" id (verified in real data, e.g.
+    # superpowers:systematic-debugging). The colon-namespaced form is the skill's
+    # true identity, so we keep it intact rather than splitting to the bare name —
+    # two plugins could both ship a "systematic-debugging".
+    tool_record = {
+        "type": "assistant",
+        "timestamp": "2026-06-17T13:00:00.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "name": "Skill",
+                 "input": {"skill": "superpowers:systematic-debugging"}}
+            ],
+        },
+    }
+    slash_record = _slash("superpowers:test-driven-development")
+
+    events = parse_events([tool_record, slash_record], session="s", host="h")
+
+    assert {e["skill"] for e in events} == {
+        "superpowers:systematic-debugging",
+        "superpowers:test-driven-development",
+    }
+
+
+def test_skill_tool_use_with_no_recognizable_name_falls_back_to_unknown():
+    # A loud <unknown> bucket is a deliberate tripwire (design §3): if a Claude
+    # Code version bump changes the input schema so the skill id stops extracting,
+    # counts crater into <unknown> visibly instead of silently vanishing.
+    record = {
+        "type": "assistant",
+        "timestamp": "2026-06-17T13:05:00.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Skill", "input": {}}],
+        },
+    }
+
+    events = parse_events([record], session="s", host="h")
+
+    assert [e["skill"] for e in events] == ["<unknown>"]
+
+
+def test_since_drops_events_before_cutoff_and_keeps_the_boundary_day():
+    # --since powers "usage in the last N days" views. The cutoff is inclusive:
+    # an event whose timestamp equals `since` is kept, only strictly-earlier ones
+    # are dropped. Filtering happens in the parser so both channels honor it.
+    before = _slash("humanizer", ts="2026-06-10T00:00:00.000Z")
+    on_cutoff = _slash("doc-coauthoring", ts="2026-06-15T00:00:00.000Z")
+    after = _slash("impeccable", ts="2026-06-20T00:00:00.000Z")
+    since = datetime(2026, 6, 15, tzinfo=timezone.utc)
+
+    events = parse_events([before, on_cutoff, after], session="s", host="h", since=since)
+
+    assert {e["skill"] for e in events} == {"doc-coauthoring", "impeccable"}

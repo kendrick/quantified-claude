@@ -141,6 +141,23 @@ def record_timestamp(record: dict) -> str | None:
     return None
 
 
+def _before_cutoff(ts: str | None, since: datetime) -> bool:
+    """
+    True only when `ts` is present, parseable, and strictly earlier than `since`.
+    Deliberately lenient: a missing or unparseable timestamp is NEVER dropped —
+    losing a real invocation to a format we failed to parse is worse than letting
+    one slip past the --since filter. The "Z" -> "+00:00" swap is because
+    fromisoformat didn't accept a bare Z until 3.11 and we target 3.9+.
+    """
+    if not ts:
+        return False
+    try:
+        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return when < since
+
+
 def parse_events(records, session: str, host: str, since: datetime | None = None,
                  builtins=BUILTIN_CLI_COMMANDS):
     """
@@ -162,6 +179,11 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     events = []
     for record in records:
         ts = record_timestamp(record)
+        # The cutoff is record-level: both channels share this timestamp, so one
+        # check gates the whole record. Inclusive of the boundary day (only
+        # strictly-earlier records are skipped).
+        if since is not None and _before_cutoff(ts, since):
+            continue
         # channel="tool": the model called the Skill tool. find_tool_uses walks
         # the record defensively because the tool_use block's depth shifts across
         # Claude Code versions.
