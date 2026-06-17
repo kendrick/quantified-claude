@@ -62,6 +62,21 @@ SKILL_NAME_KEYS = ("command", "name", "skill", "skill_name", "skillName")
 # the sibling <command-message>/<command-args> tags sometimes precede it.
 COMMAND_NAME_RE = re.compile(r"<command-name>\s*/?([^<]+?)\s*</command-name>")
 
+# Built-in CLI slash commands ride the same <command-name> rail as skills but
+# aren't skills, so they'd otherwise show up as phantom MOC rows. This denylist
+# is deliberately CONSERVATIVE: it lists only names that are always CLI built-ins
+# and never skills. Notably absent are /review, /init, /security-review and the
+# like — those ARE skills in this setup, so the safer filter for genuinely
+# ambiguous names is render-time cross-reference against the skills inventory
+# (§9), not this list. Kept as a frozenset for cheap membership tests.
+BUILTIN_CLI_COMMANDS = frozenset({
+    "add-dir", "agents", "bashes", "bug", "clear", "compact", "config", "cost",
+    "doctor", "exit", "export", "help", "hooks", "ide", "login", "logout",
+    "mcp", "memory", "model", "output-style", "permissions", "plugin",
+    "pr-comments", "quit", "release-notes", "resume", "status", "statusline",
+    "terminal-setup", "todos", "upgrade", "vim",
+})
+
 
 # --------------------------------------------------------------------------- #
 # Transcript parsing
@@ -126,7 +141,8 @@ def record_timestamp(record: dict) -> str | None:
     return None
 
 
-def parse_events(records, session: str, host: str, since: datetime | None = None):
+def parse_events(records, session: str, host: str, since: datetime | None = None,
+                 builtins=BUILTIN_CLI_COMMANDS):
     """
     Reduce one session's transcript records into usage events.
 
@@ -168,8 +184,11 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
             content = record.get("message", {}).get("content")
             if isinstance(content, str):
                 for name in COMMAND_NAME_RE.findall(content):
+                    name = name.strip()
+                    if name in builtins:
+                        continue
                     events.append({
-                        "skill": name.strip(),
+                        "skill": name,
                         "timestamp": ts,
                         "session": session,
                         "host": host,
