@@ -6,7 +6,7 @@ It reads your transcripts, tallies every skill invocation, and writes a Map of C
 
 Skill usage is the first thing it measures. The name is deliberately broad, so other facets can slot in later.
 
-## What you get
+## What You Get
 
 A file like this (counts are real, from one machine):
 
@@ -32,7 +32,7 @@ A file like this (counts are real, from one machine):
 
 The **Tool** and **Slash** columns are the interesting part. Tool counts the times Claude decided to invoke a skill on its own; Slash counts the times you typed `/skillname` yourself. A skill that's all Tool is one Claude leans on for you; a skill that's all Slash is one you drive by hand.
 
-## How it works
+## How It Works
 
 Three pieces, each with its own lifecycle, each kept where that lifecycle fits:
 
@@ -80,7 +80,7 @@ python3 ~/repos/quantified-claude/skill_usage.py render
 
 The MOC lands at `~/.claude/skills/skill-usage-moc.md` by default. That's it.
 
-## Everyday use
+## Everyday Use
 
 ```bash
 # Re-render whenever you want a fresh picture (auto-collects first):
@@ -101,13 +101,13 @@ python3 skill_usage.py render --json
 
 `collect` and `render` both take `--data-dir` (if you'd rather not use the env var) and `--host` (to override the hostname stamped on events).
 
-## Keeping it current
+## Keeping It Current
 
 You don't want to run this by hand forever. On a Mac, a `launchd` job that runs `render` once a day keeps the MOC fresh and your events synced without you thinking about it. (A plist to do that is on the to-do list.)
 
 On Linux or WSL, scheduling is fussier, but you don't strictly need a scheduler: because `render` auto-collects and the whole thing is idempotent, running `render` whenever you happen to think of it counts and syncs that machine. A WSL box that participates only occasionally still shows up correctly.
 
-## A note on transcript retention
+## A Note on Transcript Retention
 
 Claude Code prunes old session transcripts on a schedule you control (`cleanupPeriodDays`). Once you've back-filled, your usage history lives in the events store — small, versioned, committed, synced — not in the raw transcripts. So you don't have to keep transcripts forever to keep your counts.
 
