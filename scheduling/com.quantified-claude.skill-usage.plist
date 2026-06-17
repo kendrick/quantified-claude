@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent template for quantified-claude (macOS).
+
+  Don't load this file directly — the @TOKENS@ are placeholders. Run
+  scheduling/install.sh, which fills them in from your environment and loads the
+  result into ~/Library/LaunchAgents. The tokens exist because launchd needs
+  absolute paths and won't expand $HOME or read your shell's env.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.quantified-claude.skill-usage</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PYTHON@</string>
+        <string>@SCRIPT@</string>
+        <string>render</string>
+        <string>--data-dir</string>
+        <string>@DATADIR@</string>
+    </array>
+
+    <!-- render shells out to git, which won't be on launchd's minimal PATH. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin</string>
+    </dict>
+
+    <!-- Once a day at 09:00 local. render auto-collects first, so one run both
+         refreshes the MOC and syncs this machine's events. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Wait for the schedule rather than firing the moment it's loaded. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>@LOGDIR@/skill-usage.log</string>
+    <key>StandardErrorPath</key>
+    <string>@LOGDIR@/skill-usage.log</string>
+</dict>
+</plist>
