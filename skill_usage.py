@@ -437,19 +437,43 @@ def run_render(data_dir: Path, out_path: Path, links: str = "relative",
     return moc
 
 
+def canonical_skill(name: str, inventory: dict) -> str:
+    """
+    Map a used skill name to the inventory key it belongs to.
+
+    Events keep the plugin:skill id the Skill tool emits (superpowers:brainstorm),
+    but the inventory is keyed by the bare frontmatter name (brainstorming). So a
+    namespaced id that doesn't match exactly is retried against its bare suffix;
+    if that's owned, it canonicalizes to the bare key. A name with no owning
+    SKILL.md is returned unchanged so it still shows up, just as unowned. Events
+    stay namespaced on disk — only this render-time join normalizes.
+    """
+    if name in inventory:
+        return name
+    if ":" in name:
+        bare = name.split(":", 1)[1]
+        if bare in inventory:
+            return bare
+    return name
+
+
 def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(".")) -> str:
-    counts = Counter(e["skill"] for e in events)
+    def key_of(event):
+        return canonical_skill(event["skill"], inventory)
+
+    counts = Counter(key_of(e) for e in events)
     # Per-channel tallies power the Tool/Slash split: how much of a skill's use is
     # Claude reaching for it (tool) vs you invoking it by hand (slash). .get()
     # tolerates an older event without a channel rather than KeyError-ing.
-    tool_counts = Counter(e["skill"] for e in events if e.get("channel") == "tool")
-    slash_counts = Counter(e["skill"] for e in events if e.get("channel") == "slash")
+    tool_counts = Counter(key_of(e) for e in events if e.get("channel") == "tool")
+    slash_counts = Counter(key_of(e) for e in events if e.get("channel") == "slash")
 
     last_used = {}
     for e in events:
+        skill = key_of(e)
         ts = e["timestamp"]
-        if ts and (e["skill"] not in last_used or ts > last_used[e["skill"]]):
-            last_used[e["skill"]] = ts
+        if ts and (skill not in last_used or ts > last_used[skill]):
+            last_used[skill] = ts
 
     used = set(counts)
     owned = set(inventory)
