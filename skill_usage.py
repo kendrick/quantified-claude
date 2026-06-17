@@ -6,23 +6,26 @@ Builds a Map of Content (MOC) for your Claude Code skills, annotated with your
 own actual usage — counted retroactively from the session transcripts already
 on disk. No instrumentation, no waiting, no telemetry export required.
 
-What it does:
-  1. Walks ~/.claude/projects/**/*.jsonl  -> every Skill tool invocation, with
-     timestamps, the project it happened in, and the skill name.
-  2. Walks your skills directories       -> inventory of SKILL.md files (name +
-     description from the YAML frontmatter).
-  3. Joins the two and writes a markdown MOC sorted by frequency, including:
-       - skills you own and use (with counts + last-used date)
-       - skills you own but have NEVER used
-       - skills you've used that aren't in your dir (built-ins, plugin skills)
+Two subcommands, because usage rolls up across several machines (see the design
+doc for why the split is inherent rather than incidental):
+
+  collect  Parse the transcripts on this machine into usage events, merge them
+           into events/<host>.jsonl in a private data repo (keyed by session
+           UUID, so re-runs don't double-count), then git pull/commit/push.
+           Running collect IS syncing.
+
+  render   Union every host's events store, join it against your local skills
+           inventory, and write the MOC. Auto-collects this machine first so the
+           output is current the moment you generate it.
 
 Usage:
-    python3 skill_usage.py
-    python3 skill_usage.py --out ~/vault/40-MOCs/claude-skills.md
-    python3 skill_usage.py --since 2026-01-01
-    python3 skill_usage.py --json            # dump raw events instead of a MOC
+    python3 skill_usage.py collect --data-dir ~/repos/quantified-claude-events
+    python3 skill_usage.py render  --out ~/.claude/skills/skill-usage-moc.md
+    python3 skill_usage.py render  --since 2026-01-01 --links wikilink
+    python3 skill_usage.py render  --json     # dump the unioned events instead
 
-Assumes Python 3.9+. Pure stdlib, no dependencies.
+The data repo is also read from $SKILL_MOC_DATA_DIR, so --data-dir is optional
+once that's set. Assumes Python 3.9+. Pure stdlib, no dependencies.
 """
 
 from __future__ import annotations
@@ -31,8 +34,10 @@ import argparse
 import json
 import os
 import re
+import socket
+import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -330,44 +335,6 @@ def merge_events(stored, fresh, found_sessions):
     return kept + overlaid
 
 
-def collect_events(since: datetime | None):
-    """Return a list of {skill, project, timestamp, session} usage events."""
-    events = []
-    if not TRANSCRIPTS_ROOT.exists():
-        print(f"  ! No transcripts found at {TRANSCRIPTS_ROOT}", file=sys.stderr)
-        return events
-
-    for jsonl in TRANSCRIPTS_ROOT.rglob("*.jsonl"):
-        project = jsonl.parent.name  # encoded cwd; decoded below
-        session = jsonl.stem
-        for record in iter_jsonl(jsonl):
-            ts = record_timestamp(record)
-            for tu in find_tool_uses(record, "Skill"):
-                if since and ts:
-                    try:
-                        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        if when < since:
-                            continue
-                    except ValueError:
-                        pass
-                events.append({
-                    "skill": extract_skill_name(tu),
-                    "project": decode_project(project),
-                    "timestamp": ts,
-                    "session": session,
-                })
-    return events
-
-
-def decode_project(encoded: str) -> str:
-    """
-    Claude Code encodes the project cwd into the directory name (slashes -> '-').
-    We can't perfectly recover it, but the basename is the useful part.
-    """
-    parts = [p for p in encoded.split("-") if p]
-    return parts[-1] if parts else encoded
-
-
 # --------------------------------------------------------------------------- #
 # Skill inventory
 # --------------------------------------------------------------------------- #
@@ -414,8 +381,56 @@ def short(text: str, n: int = 100) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def render_moc(events, inventory) -> str:
+def format_skill_link(name: str, inventory: dict, links: str, out_dir: Path) -> str:
+    """
+    Render a skill name as a link to its SKILL.md, or a code span if we don't own
+    it. Used-but-not-owned skills (built-ins, plugin skills not on disk) have no
+    target, so linking them would just create dead links.
+
+    `relative` links are computed from the MOC's own location so they resolve in
+    any editor and on GitHub — the MOC has to ship next to the content it maps for
+    this to hold (§2). `wikilink` is for when that content lives in an Obsidian
+    vault, where [[name]] is the native cross-reference.
+    """
+    entry = inventory.get(name)
+    if not entry:
+        return f"`{name}`"
+    if links == "wikilink":
+        return f"[[{name}]]"
+    rel = os.path.relpath(entry["path"], out_dir)
+    return f"[{name}]({rel})"
+
+
+def run_render(data_dir: Path, out_path: Path, links: str = "relative",
+               since: datetime | None = None, inventory: dict | None = None) -> str:
+    """
+    The data flow of `render`, with no git: union every host's store, optionally
+    drop events before --since, join against the skills inventory, and write the
+    MOC. cmd_render layers a best-effort pull + auto-collect in front so the
+    machine you're on is current before it renders.
+
+    `inventory` is injectable so tests don't need a real ~/.claude/skills tree;
+    in production it defaults to scanning SKILL_DIRS.
+    """
+    events = union_stores(data_dir)
+    if since is not None:
+        events = [e for e in events if not _before_cutoff(e.get("timestamp"), since)]
+    if inventory is None:
+        inventory = collect_inventory()
+    moc = render_moc(events, inventory, links=links, out_dir=out_path.parent)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(moc, encoding="utf-8")
+    return moc
+
+
+def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(".")) -> str:
     counts = Counter(e["skill"] for e in events)
+    # Per-channel tallies power the Tool/Slash split: how much of a skill's use is
+    # Claude reaching for it (tool) vs you invoking it by hand (slash). .get()
+    # tolerates an older event without a channel rather than KeyError-ing.
+    tool_counts = Counter(e["skill"] for e in events if e.get("channel") == "tool")
+    slash_counts = Counter(e["skill"] for e in events if e.get("channel") == "slash")
+
     last_used = {}
     for e in events:
         ts = e["timestamp"]
@@ -427,6 +442,9 @@ def render_moc(events, inventory) -> str:
     owned_and_used = sorted(owned & used, key=lambda s: -counts[s])
     owned_unused = sorted(owned - used)
     used_not_owned = sorted(used - owned, key=lambda s: -counts[s])
+
+    def link(name):
+        return format_skill_link(name, inventory, links, out_dir)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     lines = [
@@ -444,18 +462,20 @@ def render_moc(events, inventory) -> str:
         "",
         "## Used & owned",
         "",
-        "| Skill | Uses | Last used | Description |",
-        "|---|---:|---|---|",
+        "| Skill | Uses | Tool | Slash | Last used | Description |",
+        "|---|---:|---:|---:|---|---|",
     ]
     for s in owned_and_used:
         lu = (last_used.get(s, "") or "")[:10]
         desc = short(inventory[s]["description"])
-        lines.append(f"| `{s}` | {counts[s]} | {lu} | {desc} |")
+        lines.append(
+            f"| {link(s)} | {counts[s]} | {tool_counts[s]} | {slash_counts[s]} | {lu} | {desc} |"
+        )
 
     lines += ["", "## Owned but never used", ""]
     if owned_unused:
         for s in owned_unused:
-            lines.append(f"- `{s}` — {short(inventory[s]['description'])}")
+            lines.append(f"- {link(s)} — {short(inventory[s]['description'])}")
     else:
         lines.append("*(none — you've exercised every skill in your dir)*")
 
@@ -464,50 +484,133 @@ def render_moc(events, inventory) -> str:
     if used_not_owned:
         for s in used_not_owned:
             lu = (last_used.get(s, "") or "")[:10]
-            lines.append(f"- `{s}` — {counts[s]} uses (last {lu})")
+            lines.append(f"- {link(s)} — {counts[s]} uses (last {lu})")
     else:
         lines.append("*(none)*")
 
-    lines += ["", "---", "*Built by skill-usage-moc.py*", ""]
+    lines += ["", "---", "*Built by skill_usage.py*", ""]
     return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
-# Main
+# CLI glue: data-dir resolution, best-effort git, subcommands
 # --------------------------------------------------------------------------- #
 
-def main():
-    ap = argparse.ArgumentParser(description="Build a Claude Code skills usage MOC.")
-    ap.add_argument("--out", type=Path, default=Path("claude-skills-moc.md"),
-                    help="Output markdown path (default: ./claude-skills-moc.md)")
-    ap.add_argument("--since", type=str, default=None,
-                    help="Only count usage on/after this date, e.g. 2026-01-01")
-    ap.add_argument("--json", action="store_true",
-                    help="Print raw usage events as JSON instead of writing a MOC")
-    args = ap.parse_args()
+DEFAULT_OUT = Path("~/.claude/skills/skill-usage-moc.md")
 
-    since = None
-    if args.since:
-        try:
-            since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
-        except ValueError:
-            sys.exit(f"Bad --since date: {args.since!r} (use YYYY-MM-DD)")
 
-    print(f"Scanning {TRANSCRIPTS_ROOT} ...", file=sys.stderr)
-    events = collect_events(since)
-    print(f"  found {len(events)} skill invocations", file=sys.stderr)
+def resolve_data_dir(arg: str | None) -> Path:
+    """
+    Locate the private events repo: --data-dir, then $SKILL_MOC_DATA_DIR.
+
+    The public code carries zero knowledge of where private data lives, so this
+    is required rather than defaulted — there's no sensible repo-relative guess
+    that wouldn't risk writing telemetry into the wrong place.
+    """
+    if arg:
+        return Path(arg).expanduser()
+    env = os.environ.get("SKILL_MOC_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    sys.exit("No data dir. Pass --data-dir or set SKILL_MOC_DATA_DIR to the "
+             "private events repo.")
+
+
+def parse_since(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+    except ValueError:
+        sys.exit(f"Bad --since date: {value!r} (use YYYY-MM-DD)")
+
+
+def _git(data_dir: Path, *args: str) -> bool:
+    """
+    Run one git command in the data repo, best-effort.
+
+    Sync is convenience, not correctness — the local store is already written by
+    the time we get here. So a git failure (offline, no remote, nothing to
+    commit) warns and returns False rather than aborting; the next collect picks
+    up where this one left off because the merge is idempotent.
+    """
+    try:
+        subprocess.run(["git", "-C", str(data_dir), *args],
+                       check=True, capture_output=True, text=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        detail = (getattr(exc, "stderr", "") or str(exc)).strip()
+        print(f"  ! git {' '.join(args)} skipped: {detail}", file=sys.stderr)
+        return False
+
+
+def git_pull(data_dir: Path) -> None:
+    # --rebase because each host only ever writes its own events/<host>.jsonl, so
+    # there's nothing to merge — a rebase onto the remote can't conflict.
+    _git(data_dir, "pull", "--rebase")
+
+
+def git_commit_push(data_dir: Path, host: str) -> None:
+    _git(data_dir, "add", "events")
+    # An empty commit (nothing changed) exits non-zero; best-effort swallows it.
+    _git(data_dir, "commit", "-m", f"collect: update {host}")
+    _git(data_dir, "push")
+
+
+def cmd_collect(args) -> None:
+    data_dir = resolve_data_dir(args.data_dir)
+    host = args.host or socket.gethostname()
+    git_pull(data_dir)
+    merged = run_collect(TRANSCRIPTS_ROOT, data_dir, host)
+    git_commit_push(data_dir, host)
+    print(f"collect: {len(merged)} events in store for {host}", file=sys.stderr)
+
+
+def cmd_render(args) -> None:
+    data_dir = resolve_data_dir(args.data_dir)
+    host = args.host or socket.gethostname()
+    # render auto-collects first so the machine you're on is current the moment
+    # you generate the MOC — no stale-by-one-run gap.
+    git_pull(data_dir)
+    run_collect(TRANSCRIPTS_ROOT, data_dir, host)
+    git_commit_push(data_dir, host)
 
     if args.json:
-        json.dump(events, sys.stdout, indent=2)
+        json.dump(union_stores(data_dir), sys.stdout, indent=2)
         print()
         return
 
-    inventory = collect_inventory()
-    print(f"  found {len(inventory)} skills in your dirs", file=sys.stderr)
+    out = args.out.expanduser()
+    run_render(data_dir, out, links=args.links, since=parse_since(args.since))
+    print(f"render: wrote MOC -> {out}", file=sys.stderr)
 
-    moc = render_moc(events, inventory)
-    args.out.expanduser().write_text(moc, encoding="utf-8")
-    print(f"Wrote MOC -> {args.out}", file=sys.stderr)
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Quantify your Claude Code skill usage from session transcripts.")
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    pc = sub.add_parser("collect",
+                        help="parse transcripts on disk, merge into the events store, sync")
+    pc.add_argument("--data-dir", default=None, help="private events repo (or $SKILL_MOC_DATA_DIR)")
+    pc.add_argument("--host", default=None, help="override the hostname stamped on events")
+    pc.set_defaults(func=cmd_collect)
+
+    pr = sub.add_parser("render",
+                        help="union the events stores and write the MOC (auto-collects first)")
+    pr.add_argument("--data-dir", default=None, help="private events repo (or $SKILL_MOC_DATA_DIR)")
+    pr.add_argument("--host", default=None, help="override the hostname stamped on events")
+    pr.add_argument("--out", type=Path, default=DEFAULT_OUT,
+                    help=f"MOC output path (default: {DEFAULT_OUT})")
+    pr.add_argument("--since", default=None, help="only count usage on/after YYYY-MM-DD")
+    pr.add_argument("--links", choices=["relative", "wikilink"], default="relative",
+                    help="how skill names link to SKILL.md (default: relative)")
+    pr.add_argument("--json", action="store_true",
+                    help="dump the unioned events as JSON instead of writing a MOC")
+    pr.set_defaults(func=cmd_render)
+
+    args = ap.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
