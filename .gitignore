@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Usage data must NEVER land in this PUBLIC repo. Events live in a separate
+# PRIVATE repo (see docs/plans/2026-06-17-skill-usage-moc-design.md §2). This
+# guards against an accidental `--data-dir=.` pointing collect at the repo root.
+/events/
+
+# Locally generated MOC, if someone points --out back into the repo.
+/*-moc.md
+/claude-skills-moc.md
