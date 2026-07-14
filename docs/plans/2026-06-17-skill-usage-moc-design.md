@@ -104,11 +104,18 @@ to a small file, and those files have to meet somewhere.
 
 ## 4. Data model
 
-Each event record carries only:
+Each event record carries:
 
 ```json
-{ "skill": "...", "timestamp": "...", "session": "...", "host": "..." }
+{ "skill": "...", "timestamp": "...", "session": "...", "host": "...", "channel": "tool|slash" }
 ```
+
+**`channel` distinguishes the two invocation paths** the parser must harvest
+(see §9, verified against real data): `tool` = Claude invoked the `Skill` tool
+(a `tool_use` block, key `skill`); `slash` = the user typed `/skillname` (a
+`<command-name>` tag in a user message). Keeping the channel is cheap, makes the
+counts auditable, and lets the MOC optionally show the split (how much of a
+skill's use is you-driven vs Claude-driven). It defaults sanely if absent.
 
 **`project` is deliberately dropped.** The reference script recorded it on every
 event, but the MOC counts by skill, never by project — so `project` was dead
@@ -200,17 +207,36 @@ skill-usage-moc.py render  [--data-dir DIR] [--out PATH] [--since YYYY-MM-DD]
 
 ---
 
-## 9. Verification items (confirm against the live CC version before trusting counts)
+## 9. Verification — run against real data (done 2026-06-17)
 
-1. **Skill-name extraction.** The Skill tool's input schema is undocumented and
-   drifts across CC versions. Run `skill-usage-moc.py render --json | head` (or a
-   collect dry-run) against real data, inspect the actual `input` shape, and
-   adjust `SKILL_NAME_KEYS` / `extract_skill_name` if needed.
-2. **Direct `/skillname` invocations.** Two invocation paths exist: (a) Claude
-   calls the `Skill` tool — what the parser catches; (b) the user types
-   `/skillname`, which may bypass the Skill tool. Confirm how the direct path is
-   recorded; if it's missing, either parse those records too or document the
-   undercount as a known limitation.
+1. **Skill-name extraction — RESOLVED, no fix needed.** Ran the reference
+   extractor over the live transcripts: 159 tool_use events, **0 `<unknown>`**,
+   plugin-namespaced names (`superpowers:systematic-debugging`) extracted cleanly.
+   Confirmed the raw `input` uses key **`skill`** (already in `SKILL_NAME_KEYS`).
+
+2. **Direct `/skillname` invocations — RESOLVED, parser MUST change.** The
+   bypass path is real *and large*. User-typed slash commands are recorded as
+   `<command-name>/name</command-name>` tags in user messages — a shape the
+   reference script never reads. Measured undercount on the spec-kit workflow:
+
+   | Skill | tool_use | slash | true ≈ |
+   |---|---:|---:|---:|
+   | speckit-specify | 2 | 35 | 37 |
+   | speckit-tasks | 4 | 33 | 37 |
+   | speckit-plan | 0 | 34 | 34 |
+   | speckit-clarify | 3 | 23 | 26 |
+   | speckit-implement | 2 | 16 | 18 |
+   | speckit-analyze | 0 | 12 | 12 |
+
+   **Required:** the parser harvests *both* record shapes and tags each event
+   with `channel` (§4). Two implementation cautions:
+   - **Filter built-in CLI commands** out of the slash path — `/model`,
+     `/compact`, `/mcp`, `/clear`, etc. are not skills. Use a denylist and/or
+     cross-reference the skills inventory.
+   - **Confirm tool vs slash are disjoint events**, not the same action recorded
+     twice, before summing. Evidence leans disjoint (speckit-plan is 34 slash / 0
+     tool), but key the merge carefully (e.g. by record UUID / turn proximity)
+     rather than blindly adding the two channels.
 
 ---
 
@@ -233,10 +259,16 @@ now.
 
 ## 11. Build order
 
-1. `git init` the public repo; drop in `skill-usage-moc.py` as the starting
-   module; mark it a GitHub template; ensure it's the public repo.
-2. Run `--json` on real data; confirm/fix Skill-name extraction (§9).
-3. Refactor to `collect` + `render` subcommands sharing the parser.
+1. ~~`git init` the public repo; drop in `skill-usage-moc.py`; mark it a GitHub
+   template.~~ **DONE** (local repo `~/repos/quantified-claude`, initial commit).
+   Still TODO: push to a public GitHub remote and mark it a template.
+2. ~~Run `--json` on real data; confirm Skill-name extraction.~~ **DONE** (§9):
+   tool_use extraction works (0 unknowns); found the slash-path undercount.
+3. **Rewrite the parser to harvest BOTH channels** (§9): the existing `Skill`
+   `tool_use` path *plus* `<command-name>` slash records, each tagged with
+   `channel`; filter built-in CLI commands from the slash path; key the merge so
+   tool/slash aren't double-counted. Then split into `collect` + `render`
+   subcommands sharing this parser.
 4. Implement `--data-dir`, the **merge-by-session-UUID** writer for
    `events/<host>.jsonl` (load → overlay found sessions → save), and `collect`'s
    git self-sync.
