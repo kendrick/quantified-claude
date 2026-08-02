@@ -689,18 +689,19 @@ def store_dir(data_dir: Path, name: str = "events") -> Path:
     return data_dir / name
 
 
-def union_stores(data_dir: Path) -> list:
+def union_stores(data_dir: Path, name: str = "events") -> list:
     """
-    Concatenate every host's store into the full cross-machine event set.
+    Concatenate every host's file for one stream into the cross-machine set.
 
     render builds the MOC from this union, never from a single machine's file,
     which is why every machine's regenerated MOC reflects usage from all of them.
     Sorted by filename for deterministic output (stable diffs when rendered).
+    A stream a host has never written is simply absent, and reads as empty.
     """
-    events = []
-    for store in sorted(store_dir(data_dir).glob("*.jsonl")):
-        events.extend(read_store(store))
-    return events
+    rows = []
+    for store in sorted(store_dir(data_dir, name).glob("*.jsonl")):
+        rows.extend(read_store(store))
+    return rows
 
 
 def write_store(path: Path, events) -> None:
@@ -834,6 +835,40 @@ def short(text: str, n: int = 100) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def fmt_tokens(n) -> str:
+    """
+    Render a token count for a table cell: 1234 -> 1.2k, 52553 -> 53k, 4.1e6 -> 4.1M.
+
+    Token counts span six orders of magnitude across skills, so raw integers make
+    the column unreadable and unsortable by eye. One decimal below 10 of a unit
+    keeps small numbers honest without giving huge ones false precision. Zero and
+    absent both render as a dash: a skill with no usage rows hasn't been measured
+    at zero, it simply has nothing recorded.
+    """
+    if not n:
+        return "—"
+    for limit, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if n >= limit:
+            scaled = n / limit
+            return f"{scaled:.1f}{suffix}" if scaled < 10 else f"{scaled:.0f}{suffix}"
+    return str(int(n))
+
+
+def event_thread(event) -> str:
+    """
+    Which thread an event came from, inferred when the field predates module 2.
+
+    Events collected before thread-tagging carry no `thread`, and once their
+    transcript ages off disk that can never be re-derived. The `agent-` stem is
+    the same tell collect_from_disk classifies on, so an old row still lands on
+    the right side of the split rather than silently counting as main.
+    """
+    thread = event.get("thread")
+    if thread:
+        return thread
+    return "agent" if str(event.get("session", "")).startswith("agent-") else "main"
+
+
 def format_skill_link(name: str, inventory: dict, links: str, out_dir: Path) -> str:
     """
     Render a skill name as a link to its SKILL.md, or a code span if we don't own
@@ -866,11 +901,18 @@ def run_render(data_dir: Path, out_path: Path, links: str = "relative",
     in production it defaults to scanning SKILL_DIRS.
     """
     events = union_stores(data_dir)
+    usage_rows = union_stores(data_dir, "usage")
     if since is not None:
         events = [e for e in events if not _before_cutoff(e.get("timestamp"), since)]
+        # Same cutoff, same helper. A usage row's timestamp is the latest message
+        # in its group, so --since keeps a group that was still active on the
+        # boundary rather than splitting an aggregate nobody can split.
+        usage_rows = [r for r in usage_rows
+                      if not _before_cutoff(r.get("timestamp"), since)]
     if inventory is None:
         inventory = collect_inventory()
-    moc = render_moc(events, inventory, links=links, out_dir=out_path.parent)
+    moc = render_moc(events, inventory, usage_rows=usage_rows, links=links,
+                     out_dir=out_path.parent)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(moc, encoding="utf-8")
     return moc
@@ -896,11 +938,31 @@ def canonical_skill(name: str, inventory: dict) -> str:
     return name
 
 
-def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(".")) -> str:
+def render_moc(events, inventory, usage_rows=None, links: str = "relative",
+               out_dir: Path = Path(".")) -> str:
+    """
+    Build the MOC: a skills map annotated with how much you actually use each one.
+
+    `usage_rows` is optional so a store predating the usage stream still renders,
+    with a column of dashes rather than an error. The MOC stays a skills map and
+    gains exactly one number; everything richer lives in the separate report.
+    """
     def key_of(event):
         return canonical_skill(event["skill"], inventory)
 
     counts = Counter(key_of(e) for e in events)
+
+    # Tokens join to skills through the same canonicalization the counts use, so
+    # a namespaced attributionSkill lands on the bare owned row. This is the
+    # four-bucket total, matching the identity the design doc verified against
+    # toolUseResult.totalTokens (§3), which means cache reads dominate it.
+    tokens = Counter()
+    for row in usage_rows or []:
+        skill = row.get("skill")
+        if not skill:
+            continue
+        tokens[canonical_skill(skill, inventory)] += sum(
+            row.get(field) or 0 for field in USAGE_TOKEN_KEYS)
     # Per-channel tallies power the Tool/Slash split: how much of a skill's use is
     # Claude reaching for it (tool) vs you invoking it by hand (slash). .get()
     # tolerates an older event without a channel rather than KeyError-ing.
@@ -923,6 +985,15 @@ def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(
     def link(name):
         return format_skill_link(name, inventory, links, out_dir)
 
+    # An agent transcript is a session file, so the old count folded subagent
+    # runs in with the sessions you actually started and reported a number
+    # bigger than the conversations you had. Splitting them says what happened.
+    sessions = {e["session"] for e in events if event_thread(e) == "main"}
+    agent_runs = {e["session"] for e in events if event_thread(e) == "agent"}
+    summary = f"{len(sessions)} sessions"
+    if agent_runs:
+        summary += f" + {len(agent_runs)} agent runs"
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     lines = [
         "---",
@@ -935,18 +1006,19 @@ def render_moc(events, inventory, links: str = "relative", out_dir: Path = Path(
         "# Claude Code Skills — Usage MOC",
         "",
         f"*Generated {now} from {len(events)} skill invocations across "
-        f"{len({e['session'] for e in events})} sessions.*",
+        f"{summary}.*",
         "",
         "## Used & Owned",
         "",
-        "| Skill | Uses | Tool | Slash | Last used | Description |",
-        "|---|---:|---:|---:|---|---|",
+        "| Skill | Uses | Tool | Slash | Tokens | Last used | Description |",
+        "|---|---:|---:|---:|---:|---|---|",
     ]
     for s in owned_and_used:
         lu = (last_used.get(s, "") or "")[:10]
         desc = short(inventory[s]["description"])
         lines.append(
-            f"| {link(s)} | {counts[s]} | {tool_counts[s]} | {slash_counts[s]} | {lu} | {desc} |"
+            f"| {link(s)} | {counts[s]} | {tool_counts[s]} | {slash_counts[s]} | "
+            f"{fmt_tokens(tokens.get(s))} | {lu} | {desc} |"
         )
 
     lines += ["", "## Owned but Never Used", ""]
