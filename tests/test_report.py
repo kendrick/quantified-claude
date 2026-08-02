@@ -16,8 +16,10 @@ at all and still has to render a file rather than raise.
 from datetime import datetime, timezone
 from pathlib import Path
 
-from skill_usage import (render_agent_types, render_models_by_thread,
-                         render_report, run_render, short_model, write_store)
+from skill_usage import (render_agent_types, render_cache_economics,
+                         render_models_by_thread, render_report,
+                         render_skills_by_agent, render_tokens_by_skill,
+                         run_render, short_model, write_store)
 
 
 def _usage(model="claude-opus-5", thread="main", messages=1,
@@ -234,3 +236,130 @@ def test_since_filters_the_spawn_rows_the_report_sees(tmp_path):
                since=datetime(2026, 7, 1, tzinfo=timezone.utc), report_path=report)
 
     assert _cells(report.read_text(encoding="utf-8").splitlines(), "Explore")[1] == "1"
+
+
+def _skill_event(skill, thread="main", agent_type=None, session="S"):
+    event = {"skill": skill, "timestamp": "2026-07-14T10:00:00.000Z",
+             "session": session, "host": "h", "channel": "tool", "thread": thread}
+    if agent_type:
+        event["agent_type"] = agent_type
+    return event
+
+
+def test_tokens_by_skill_ranks_and_shows_the_model_mix():
+    # Skills and models are many-to-many: a skill runs on whatever model the
+    # thread it fired in was using, so one skill can span several.
+    rows = [
+        _usage(skill="decompose", model="claude-fable-5", tokens=(600, 0, 0, 0)),
+        _usage(skill="decompose", model="claude-opus-5", tokens=(400, 0, 0, 0)),
+        _usage(skill="humanizer", model="claude-opus-5", tokens=(100, 0, 0, 0)),
+    ]
+
+    lines = render_tokens_by_skill(rows)
+    cells = _cells(lines, "`decompose`")
+
+    assert cells[1] == "1.0k"
+    assert cells[3] == "fable-5 60%, opus-5 40%"
+    # Ranked by tokens, so the expensive skill leads regardless of call count.
+    labels = [l.split("|")[1].strip() for l in lines
+              if l.startswith("|") and "`" in l]
+    assert labels == ["`decompose`", "`humanizer`"]
+
+
+def test_tokens_by_skill_ignores_rows_with_no_attribution():
+    # Most assistant turns spend tokens outside any skill. They're the bulk of
+    # the usage store and have no row to land on here.
+    rows = [_usage(skill=None, tokens=(9999, 0, 0, 0)),
+            _usage(skill="humanizer", tokens=(10, 0, 0, 0))]
+
+    assert _cells(render_tokens_by_skill(rows), "`humanizer`")[1] == "10"
+
+
+def test_tokens_by_skill_says_when_nothing_is_attributed():
+    rows = [_usage(skill=None, tokens=(9999, 0, 0, 0))]
+
+    assert "*(no usage rows carry a skill attribution)*" in render_tokens_by_skill(rows)
+
+
+def test_tokens_by_skill_notes_what_it_truncated():
+    # Silent truncation would read as "these are all your skills".
+    rows = [_usage(skill=f"s{i}", tokens=(i + 1, 0, 0, 0)) for i in range(5)]
+
+    assert "*(3 more skills not shown.)*" in render_tokens_by_skill(rows, top_n=2)
+
+
+def test_cache_economics_reports_the_read_to_creation_ratio():
+    # The question: how much am I re-reading versus re-paying to store. A high
+    # ratio means the cache is earning its keep.
+    rows = [_usage(model="claude-opus-5", tokens=(100, 0, 1000, 33000))]
+
+    cells = _cells(render_cache_economics(rows), "opus-5")
+
+    assert cells[1] == "100"      # fresh input
+    assert cells[2] == "1.0k"     # cache creation
+    assert cells[3] == "33k"      # cache read
+    assert cells[4] == "33.0x"
+
+
+def test_cache_economics_has_no_ratio_without_any_creation():
+    # Nothing was cached, so there's no ratio to state. A zero would imply the
+    # cache was built and never read.
+    rows = [_usage(model="claude-opus-5", tokens=(100, 0, 0, 0))]
+
+    assert _cells(render_cache_economics(rows), "opus-5")[4] == "—"
+
+
+def test_cache_economics_sums_across_rows_for_one_model():
+    rows = [_usage(model="claude-opus-5", tokens=(0, 0, 500, 1000)),
+            _usage(model="claude-opus-5", tokens=(0, 0, 500, 3000))]
+
+    assert _cells(render_cache_economics(rows), "opus-5")[4] == "4.0x"
+
+
+def test_skills_by_agent_shows_one_skill_across_two_agent_types():
+    # The table the module is chasing. The same skill is something you invoke by
+    # hand AND something two different agent types reach for.
+    events = ([_skill_event("humanizer")] * 3
+              + [_skill_event("humanizer", "agent", "worker-craft")] * 2
+              + [_skill_event("humanizer", "agent", "hydrator")])
+
+    cells = _cells(render_skills_by_agent(events), "`humanizer`")
+
+    assert cells[1] == "3"
+    assert cells[2] == "3"
+    assert cells[3] == "worker-craft ×2, hydrator ×1"
+
+
+def test_a_main_thread_only_skill_shows_a_dash_for_agents():
+    cells = _cells(render_skills_by_agent([_skill_event("docx")]), "`docx`")
+
+    assert cells[1] == "1" and cells[2] == "0" and cells[3] == "—"
+
+
+def test_a_pre_enrichment_agent_event_is_labelled_unattributed():
+    # An event collected before thread-tagging has no agent_type and can never
+    # get one once its transcript is pruned. The stem still places it on the
+    # agent side, so it's counted but honestly labelled rather than guessed at.
+    event = {"skill": "humanizer", "timestamp": "2026-06-01T00:00:00.000Z",
+             "session": "agent-old", "host": "h", "channel": "tool"}
+
+    cells = _cells(render_skills_by_agent([event]), "`humanizer`")
+
+    assert cells[1] == "0" and cells[2] == "1"
+    assert cells[3] == "<unattributed> ×1"
+
+
+def test_the_report_renders_all_five_sections():
+    report = render_report([_usage(skill="humanizer")], [_spawn()],
+                           [_skill_event("humanizer")])
+
+    for heading in ("## Models × Thread", "## Agent Types", "## Tokens by Skill",
+                    "## Cache Economics", "## Skills × Agents"):
+        assert heading in report
+
+
+def test_every_new_section_survives_an_empty_stream():
+    report = render_report([], [], [])
+
+    assert "*(no usage rows yet)*" in report
+    assert "*(no skill events yet)*" in report

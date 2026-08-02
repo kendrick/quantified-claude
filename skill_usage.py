@@ -1183,6 +1183,125 @@ def render_agent_types(spawn_rows, usage_rows=None) -> list:
     return lines + [""]
 
 
+def render_tokens_by_skill(usage_rows, top_n: int = 15) -> list:
+    """
+    The most expensive skills, with the model mix each one ran on.
+
+    Skills and models are many-to-many: one skill runs on whatever model the
+    thread it fired in was using, so the mix column is where that shows up. Skill
+    ids stay exactly as `attributionSkill` wrote them, namespace included. The
+    MOC canonicalizes because it joins against an inventory; this section has no
+    inventory to join to, so normalizing here would invent a claim.
+    """
+    lines = ["## Tokens by Skill", ""]
+    if not usage_rows:
+        return lines + ["*(no usage rows yet)*", ""]
+
+    by_skill = {}
+    for row in usage_rows:
+        skill = row.get("skill")
+        if not skill:
+            continue
+        entry = by_skill.setdefault(skill, {"tokens": 0, "messages": 0,
+                                            "models": Counter()})
+        tokens = _row_tokens(row)
+        entry["tokens"] += tokens
+        entry["messages"] += row.get("messages") or 0
+        entry["models"][short_model(row.get("model"))] += tokens
+
+    if not by_skill:
+        return lines + ["*(no usage rows carry a skill attribution)*", ""]
+
+    lines += ["| Skill | Tokens | Messages | Model mix |", "|---|---:|---:|---|"]
+    ranked = sorted(by_skill, key=lambda s: -by_skill[s]["tokens"])[:top_n]
+    for skill in ranked:
+        entry = by_skill[skill]
+        total = entry["tokens"] or 1
+        mix = ", ".join(f"{model} {round(100 * tokens / total)}%"
+                        for model, tokens in entry["models"].most_common(3))
+        lines.append(f"| `{skill}` | {fmt_tokens(entry['tokens'])} | "
+                     f"{entry['messages']} | {mix} |")
+    if len(by_skill) > top_n:
+        lines.append(f"")
+        lines.append(f"*({len(by_skill) - top_n} more skills not shown.)*")
+    return lines + [""]
+
+
+def render_cache_economics(usage_rows) -> list:
+    """
+    Per model: what you paid fresh, what you paid to cache, what you re-read.
+
+    The question this answers is how much of the spend is re-reading context you
+    already paid to store. A high read-to-creation ratio means the cache is doing
+    its job; a low one means you're re-paying to build it. Cache reads dominate
+    the raw totals everywhere else in this report, so this is the section that
+    says whether that's good news.
+    """
+    lines = ["## Cache Economics", ""]
+    if not usage_rows:
+        return lines + ["*(no usage rows yet)*", ""]
+
+    totals = {}
+    for row in usage_rows:
+        entry = totals.setdefault(short_model(row.get("model")),
+                                  dict.fromkeys(USAGE_TOKEN_KEYS, 0))
+        for field in USAGE_TOKEN_KEYS:
+            entry[field] += row.get(field) or 0
+
+    lines += ["| Model | Fresh input | Cache creation | Cache read | Read : creation |",
+              "|---|---:|---:|---:|---:|"]
+    for model in sorted(totals, key=lambda m: -totals[m]["cache_read_input_tokens"]):
+        entry = totals[model]
+        created = entry["cache_creation_input_tokens"]
+        read = entry["cache_read_input_tokens"]
+        # No creation means nothing was cached, so there's no ratio to state.
+        ratio = f"{read / created:.1f}x" if created else "—"
+        lines.append(
+            f"| {model} | {fmt_tokens(entry['input_tokens'])} | "
+            f"{fmt_tokens(created)} | {fmt_tokens(read)} | {ratio} |")
+    return lines + [""]
+
+
+def render_skills_by_agent(skill_events, top_n: int = 20) -> list:
+    """
+    Which skills fire on the main thread, and which fire inside which agents.
+
+    The table the module has been chasing. Skills, agents, and models have no
+    clean 1:1 mapping, and this is where that stops being an assertion: a skill
+    can be something you invoke by hand, something an Explore agent reaches for,
+    or both, and the counts differ.
+
+    Agent types are listed with counts rather than spread across columns. There
+    are fifteen of them on this machine, and a fifteen-column matrix of mostly
+    zeroes reads worse than the list it's hiding.
+    """
+    lines = ["## Skills × Agents", ""]
+    if not skill_events:
+        return lines + ["*(no skill events yet)*", ""]
+
+    by_skill = {}
+    for event in skill_events:
+        entry = by_skill.setdefault(event.get("skill") or "<unknown>",
+                                    {"main": 0, "agent": 0, "types": Counter()})
+        if event_thread(event) == "agent":
+            entry["agent"] += 1
+            entry["types"][event.get("agent_type") or "<unattributed>"] += 1
+        else:
+            entry["main"] += 1
+
+    lines += ["| Skill | Main | Agent | Fired inside |", "|---|---:|---:|---|"]
+    ranked = sorted(by_skill, key=lambda s: -(by_skill[s]["main"] + by_skill[s]["agent"]))
+    for skill in ranked[:top_n]:
+        entry = by_skill[skill]
+        inside = ", ".join(f"{name} ×{n}" for name, n in entry["types"].most_common())
+        lines.append(f"| `{skill}` | {entry['main']} | {entry['agent']} | "
+                     f"{inside or '—'} |")
+    if len(by_skill) > top_n:
+        lines.append("")
+        lines.append(f"*({len(by_skill) - top_n} more skills not shown.)*")
+    return lines + [""]
+
+
 def render_report(usage_rows, spawn_rows, skill_events) -> str:
     """
     Build the exploration artifact that sits beside the MOC.
@@ -1210,6 +1329,9 @@ def render_report(usage_rows, spawn_rows, skill_events) -> str:
     ]
     lines += render_models_by_thread(usage_rows)
     lines += render_agent_types(spawn_rows, usage_rows)
+    lines += render_tokens_by_skill(usage_rows)
+    lines += render_cache_economics(usage_rows)
+    lines += render_skills_by_agent(skill_events)
     lines += ["---", "*Built by skill_usage.py*", ""]
     return "\n".join(lines)
 
