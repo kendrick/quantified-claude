@@ -101,6 +101,13 @@ USAGE_TOKEN_KEYS = (
 # it, and a spawn we fail to recognize is a run missing from the store.
 AGENT_TOOL_NAMES = ("Agent", "Task")
 
+# Claude Code writes this literal into a text block when a turn is cut short.
+# It has to be matched inside `text` blocks only. The same string turns up inside
+# tool_result content whenever a session reads a file that discusses it (4 such
+# hits against 19 real ones on this machine), which is the same false positive
+# the slash-channel filter guards against.
+INTERRUPT_MARKER = "[Request interrupted"
+
 
 # --------------------------------------------------------------------------- #
 # Transcript parsing
@@ -219,7 +226,14 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     events = []
     agent_type = None
     parent_session = None
+    cc_version = None
     for record in records:
+        # Stamped so a parser regression is traceable to the Claude Code release
+        # that caused it. Last one seen wins: a session spanning an upgrade is
+        # attributed to the version it finished on.
+        version = record.get("version")
+        if isinstance(version, str):
+            cc_version = version
         # Both fields are constant across an agent file, but attributionAgent
         # can first appear on a record *after* an early skill event, so scan for
         # them and stamp every event once the file is done. This runs ahead of
@@ -276,8 +290,9 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     # shows up late still reaches the events that preceded it. A 2.1.92-era file
     # has no attributionAgent at all; null is the honest answer there, not a
     # guess, and it keeps the field present so readers don't special-case it.
-    if thread == "agent":
-        for event in events:
+    for event in events:
+        event["cc_version"] = cc_version
+        if thread == "agent":
             event["agent_type"] = agent_type
             event["parent_session"] = parent_session
     return events
@@ -307,6 +322,7 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
     parent_session = None
     seen_message_ids = set()
     buckets = {}
+    cc_version = None
 
     for record in records:
         # Same enrichment scan as parse_events, and ahead of the cutoff for the
@@ -317,6 +333,9 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
                 agent_type = record.get("attributionAgent")
             if parent_session is None:
                 parent_session = record.get("sessionId")
+        version = record.get("version")
+        if isinstance(version, str):
+            cc_version = version
 
         ts = record_timestamp(record)
         if since is not None and _before_cutoff(ts, since):
@@ -371,11 +390,119 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
         }
         row.update({field: bucket[field] for field in USAGE_TOKEN_KEYS})
         row["timestamp"] = bucket["timestamp"]
+        row["cc_version"] = cc_version
         if thread == "agent":
             row["agent_type"] = agent_type
             row["parent_session"] = parent_session
         rows.append(row)
     return rows
+
+
+def _walk_blocks(obj):
+    """Yield every dict carrying a `type`, at any depth in a record.
+
+    Same defensive posture as find_tool_uses: block depth has moved across
+    Claude Code versions, so the census walks rather than indexing a fixed path.
+    """
+    if isinstance(obj, dict):
+        if "type" in obj:
+            yield obj
+        for value in obj.values():
+            yield from _walk_blocks(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_blocks(item)
+
+
+def parse_stats(records, session: str, host: str, thread: str = "main"):
+    """
+    Reduce one transcript into a single row of session-level counters.
+
+    Everything here is signal the other three streams throw away: which tools ran
+    and how often they errored (MCP tools included, and an ExitPlanMode error is
+    effectively a rejected plan), how often a session compacted or hit an API
+    error, how often you interrupted it, and how many PRs it opened.
+
+    No `since` parameter, unlike the other parsers. These are whole-file
+    counters, and a cutoff would silently turn "this session ran 45 tools" into
+    a partial number wearing a total's clothing.
+
+    Returns a list holding exactly one row, so the caller extends a stream with
+    it exactly like the others.
+
+    PRIVACY: pr-link records carry `prUrl` and `prRepository`, which name client
+    repositories. Only the deduplicated COUNT is stored (§4).
+
+    `prs_created` dedups WITHIN a session, so summing it across rows is not the
+    number of distinct PRs: one PR worked across two sessions contributes to
+    both. On this machine that's 18 summed against 17 actually distinct. Render
+    and audit should say "PRs worked on" rather than claim a unique total, which
+    the store can no longer reconstruct once the repo and number are dropped.
+    """
+    tool_names = {}
+    for record in records:
+        for block in _walk_blocks(record):
+            if block.get("type") == "tool_use" and block.get("id"):
+                tool_names[block["id"]] = block.get("name") or "<unknown>"
+
+    tool_calls = {}
+    compactions = interrupts = api_errors = 0
+    pull_requests = set()
+    cc_version = None
+    latest_ts = None
+
+    for record in records:
+        version = record.get("version")
+        if isinstance(version, str):
+            cc_version = version
+        ts = record_timestamp(record)
+        if ts is not None and (latest_ts is None or ts > latest_ts):
+            latest_ts = ts
+
+        record_type = record.get("type")
+        if record_type == "system":
+            subtype = record.get("subtype")
+            # Matched on the structured field, never on a substring. Real
+            # transcripts quote "compact_boundary" inside tool_result content
+            # whenever a session reads a doc about it, and a text search counts
+            # those as compactions that never happened.
+            if subtype == "compact_boundary":
+                compactions += 1
+            elif subtype == "api_error":
+                api_errors += 1
+        elif record_type == "pr-link":
+            # The harness re-emits a PR on every subsequent turn, so the raw
+            # count runs ~22x high. The pair is the identity; neither half of it
+            # is ever stored.
+            pull_requests.add((record.get("prRepository"), record.get("prNumber")))
+
+        for block in _walk_blocks(record):
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                name = block.get("name") or "<unknown>"
+                tool_calls.setdefault(name, {"calls": 0, "errors": 0})["calls"] += 1
+            elif block_type == "tool_result" and block.get("is_error"):
+                # An orphan result (its tool_use aged out of a truncated file)
+                # has no name to charge the error to, so it's dropped rather
+                # than invented.
+                name = tool_names.get(block.get("tool_use_id"))
+                if name is not None:
+                    tool_calls.setdefault(name, {"calls": 0, "errors": 0})["errors"] += 1
+            elif block_type == "text" and INTERRUPT_MARKER in (block.get("text") or ""):
+                interrupts += 1
+
+    return [{
+        "session": session,
+        "host": host,
+        "thread": thread,
+        "timestamp": latest_ts,
+        "tool_calls": dict(sorted(tool_calls.items())),
+        "compactions": compactions,
+        "interrupts": interrupts,
+        "api_errors": api_errors,
+        "prs_created": len(pull_requests),
+        "cc_version": cc_version,
+    }]
 
 
 def _result_tool_use_id(record: dict) -> str | None:
@@ -426,7 +553,11 @@ def parse_spawns(records, session: str, host: str, since: datetime | None = None
             }
 
     rows = []
+    cc_version = None
     for record in records:
+        version = record.get("version")
+        if isinstance(version, str):
+            cc_version = version
         result = record.get("toolUseResult")
         if not isinstance(result, dict) or "agentId" not in result:
             continue
@@ -452,6 +583,7 @@ def parse_spawns(records, session: str, host: str, since: datetime | None = None
             # Passed through verbatim: it's a small counter map the harness owns,
             # and freezing its keys here would drop new ones on a version bump.
             "tool_stats": result.get("toolStats"),
+            "cc_version": cc_version,
         })
     return rows
 
@@ -471,14 +603,16 @@ def run_collect(transcripts_root: Path, data_dir: Path, host: str,
     session. One `found_sessions` therefore governs all of them, which is what
     keeps a pruned session's tokens alive alongside its skill events.
     """
-    fresh_events, fresh_usage, fresh_spawns, found_sessions = collect_from_disk(
-        transcripts_root, host, since)
+    (fresh_events, fresh_usage, fresh_spawns, fresh_stats,
+     found_sessions) = collect_from_disk(transcripts_root, host, since)
     merged = overlay_store(store_dir(data_dir, "events") / f"{host}.jsonl",
                            fresh_events, found_sessions)
     overlay_store(store_dir(data_dir, "usage") / f"{host}.jsonl",
                   fresh_usage, found_sessions)
     overlay_store(store_dir(data_dir, "agents") / f"{host}.jsonl",
                   fresh_spawns, found_sessions)
+    overlay_store(store_dir(data_dir, "stats") / f"{host}.jsonl",
+                  fresh_stats, found_sessions)
     return merged
 
 
@@ -491,7 +625,8 @@ def overlay_store(path: Path, fresh, found_sessions) -> list:
 
 def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None = None):
     """
-    Walk a transcripts tree and reduce it to (events, usage_rows, found_sessions).
+    Walk a transcripts tree and reduce it to one list per stream, plus the
+    set of sessions seen.
 
     Every *.jsonl under the root is one session, named by its stem (the session
     UUID). We record the session in `found_sessions` whether or not it yielded
@@ -507,6 +642,7 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
     fresh_events = []
     fresh_usage = []
     fresh_spawns = []
+    fresh_stats = []
     found_sessions = set()
     for jsonl in sorted(transcripts_root.rglob("*.jsonl")):
         session = jsonl.stem
@@ -525,11 +661,13 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
                                          since=since, thread=thread))
         fresh_usage.extend(parse_usage(records, session=session, host=host,
                                        thread=thread, since=since))
+        fresh_stats.extend(parse_stats(records, session=session, host=host,
+                                       thread=thread))
         # Spawns are recorded by the PARENT, so an agent file has none to give.
         if not is_agent:
             fresh_spawns.extend(parse_spawns(records, session=session, host=host,
                                              since=since))
-    return fresh_events, fresh_usage, fresh_spawns, found_sessions
+    return fresh_events, fresh_usage, fresh_spawns, fresh_stats, found_sessions
 
 
 def read_store(path: Path) -> list:
@@ -905,7 +1043,7 @@ def git_pull(data_dir: Path) -> None:
 
 
 def git_commit_push(data_dir: Path, host: str) -> None:
-    _git(data_dir, "add", "events", "usage", "agents")
+    _git(data_dir, "add", "events", "usage", "agents", "stats")
     # An empty commit (nothing changed) exits non-zero; best-effort swallows it.
     _git(data_dir, "commit", "-m", f"collect: update {host}")
     _git(data_dir, "push")

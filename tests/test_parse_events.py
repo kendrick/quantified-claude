@@ -80,6 +80,7 @@ def test_tool_use_block_yields_one_tool_channel_event():
             "host": "laptop",
             "channel": "tool",
             "thread": "main",
+            "cc_version": None,
         }
     ]
 
@@ -112,6 +113,7 @@ def test_slash_command_in_user_message_yields_slash_channel_event():
             "host": "laptop",
             "channel": "slash",
             "thread": "main",
+            "cc_version": None,
         }
     ]
 
@@ -247,6 +249,7 @@ def test_agent_thread_event_carries_the_type_and_the_parent_session():
             "host": "laptop",
             "channel": "tool",
             "thread": "agent",
+            "cc_version": None,
             "agent_type": "Explore",
             "parent_session": "f7a73a51-parent-uuid",
         }

@@ -99,6 +99,7 @@ def test_a_full_result_populates_every_field():
         "tool_use_count": 45,
         "tool_stats": {"readCount": 25, "bashCount": 20,
                        "linesAdded": 0, "linesRemoved": 0},
+        "cc_version": None,
     }
 
 

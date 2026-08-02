@@ -249,3 +249,69 @@ def test_a_pruned_parents_spawn_rows_survive(tmp_path):
 
     rows = read_store(data_dir / "agents" / "laptop.jsonl")
     assert {r["agent_id"] for r in rows} == {"agent-old", "agent-new"}
+
+
+def test_one_collect_writes_all_four_streams(tmp_path):
+    # The whole point of Phase 1: one walk of the transcripts, four stores.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    request, result = _spawn_pair()
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl",
+           _tool_use("humanizer"), _usage(skill="humanizer"), request, result)
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    for stream in ("events", "usage", "agents", "stats"):
+        rows = read_store(data_dir / stream / "laptop.jsonl")
+        assert rows, f"{stream} store is empty"
+
+
+def test_every_stream_stamps_the_claude_code_version(tmp_path):
+    # A parser regression after a version bump has to be traceable to the release
+    # that caused it, in whichever stream shows the damage.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    request, result = _spawn_pair()
+    for record in (request, result):
+        record["version"] = "2.1.220"
+    skill = _tool_use("humanizer")
+    skill["version"] = "2.1.220"
+    tokens = _usage(skill="humanizer")
+    tokens["version"] = "2.1.220"
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl", skill, tokens, request, result)
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    for stream in ("events", "usage", "agents", "stats"):
+        rows = read_store(data_dir / stream / "laptop.jsonl")
+        assert all(r["cc_version"] == "2.1.220" for r in rows), stream
+
+
+def test_the_stats_store_is_idempotent_across_repeated_runs(tmp_path):
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl",
+           _tool_use("humanizer"), _usage(skill="humanizer"))
+
+    run_collect(transcripts, data_dir, host="laptop")
+    first = read_store(data_dir / "stats" / "laptop.jsonl")
+    run_collect(transcripts, data_dir, host="laptop")
+    second = read_store(data_dir / "stats" / "laptop.jsonl")
+
+    assert first == second
+
+
+def test_stats_are_written_for_agent_transcripts_too(tmp_path):
+    # Unlike spawns, stats are per-file. A subagent's own tool census is real
+    # usage and belongs in the store, tagged to the agent thread.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl", _tool_use("humanizer"))
+    _write(transcripts / "-Users-me-repo" / "sess1" / "subagents" / "agent-1.jsonl",
+           _usage(skill="humanizer"))
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    rows = {r["session"]: r for r in read_store(data_dir / "stats" / "laptop.jsonl")}
+    assert rows["sess1"]["thread"] == "main"
+    assert rows["agent-1"]["thread"] == "agent"
