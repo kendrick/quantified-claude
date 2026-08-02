@@ -164,7 +164,7 @@ def _before_cutoff(ts: str | None, since: datetime) -> bool:
 
 
 def parse_events(records, session: str, host: str, since: datetime | None = None,
-                 builtins=BUILTIN_CLI_COMMANDS):
+                 builtins=BUILTIN_CLI_COMMANDS, thread: str = "main"):
     """
     Reduce one session's transcript records into usage events.
 
@@ -174,7 +174,14 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     exercised against fixture lines without staging a fake ~/.claude tree.
 
     Each event is the minimal tuple the events store needs:
-        {skill, timestamp, session, host, channel}
+        {skill, timestamp, session, host, channel, thread}
+    and agent-thread events carry {agent_type, parent_session} on top.
+
+    `thread` says which side of the spawn boundary these records came from.
+    collect_from_disk has been parsing subagent transcripts all along — 39 of
+    363 historical tool events came from inside one — and folding them silently
+    into the main-thread counts throws away the answer to "which skills does
+    Claude reach for inside an Explore agent versus on the main thread" (§5).
 
     `project` is intentionally NOT recorded. The MOC counts by skill, never by
     project, so it was dead weight — and it happened to encode client names
@@ -182,7 +189,20 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     rather than guarding it (design doc §4).
     """
     events = []
+    agent_type = None
+    parent_session = None
     for record in records:
+        # Both fields are constant across an agent file, but attributionAgent
+        # can first appear on a record *after* an early skill event, so scan for
+        # them and stamp every event once the file is done. This runs ahead of
+        # the --since check on purpose: a cutoff that skips the opening records
+        # must not also cost us the file's identity.
+        if thread == "agent":
+            if agent_type is None:
+                agent_type = record.get("attributionAgent")
+            if parent_session is None:
+                parent_session = record.get("sessionId")
+
         ts = record_timestamp(record)
         # The cutoff is record-level: both channels share this timestamp, so one
         # check gates the whole record. Inclusive of the boundary day (only
@@ -199,6 +219,7 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
                 "session": session,
                 "host": host,
                 "channel": "tool",
+                "thread": thread,
             })
 
         # channel="slash": the user typed /skillname. We only trust USER messages
@@ -220,7 +241,17 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
                         "session": session,
                         "host": host,
                         "channel": "slash",
+                        "thread": thread,
                     })
+
+    # Stamped after the walk rather than inline, so an attributionAgent that
+    # shows up late still reaches the events that preceded it. A 2.1.92-era file
+    # has no attributionAgent at all; null is the honest answer there, not a
+    # guess, and it keeps the field present so readers don't special-case it.
+    if thread == "agent":
+        for event in events:
+            event["agent_type"] = agent_type
+            event["parent_session"] = parent_session
     return events
 
 
@@ -251,14 +282,25 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
     events — an eventless transcript is still "seen this run", and the overlay
     must treat it as authoritative rather than mistaking it for a pruned session
     whose history should be preserved.
+
+    The rglob also picks up subagent transcripts at
+    <session>/subagents/agent-<id>.jsonl, which it always has. They're tagged
+    rather than filtered: a skill call inside an Explore agent is real usage, it
+    just belongs to a different thread (§5).
     """
     fresh = []
     found_sessions = set()
     for jsonl in sorted(transcripts_root.rglob("*.jsonl")):
         session = jsonl.stem
         found_sessions.add(session)
+        # Two independent tells, either one sufficient. The directory is the
+        # real signal; the stem prefix keeps the classification working if a
+        # future layout moves these files but keeps naming them agent-<id>.
+        # Main-thread files are named by UUID, so the prefix can't false-positive.
+        is_agent = jsonl.parent.name == "subagents" or jsonl.stem.startswith("agent-")
         records = iter_jsonl(jsonl)
-        fresh.extend(parse_events(records, session=session, host=host, since=since))
+        fresh.extend(parse_events(records, session=session, host=host, since=since,
+                                  thread="agent" if is_agent else "main"))
     return fresh, found_sessions
 
 

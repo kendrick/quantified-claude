@@ -23,6 +23,21 @@ def _ev(skill, session, channel="tool", ts="2026-06-17T00:00:00.000Z"):
     }
 
 
+def test_events_written_before_the_thread_field_existed_still_merge():
+    # Forward compatibility is the store's whole contract: fields are only ever
+    # added, never renamed, and the merge keys on `session` alone. A pruned
+    # session recorded before thread/agent_type existed can never be re-derived,
+    # so it has to survive untouched rather than be normalized or dropped.
+    pre_enrichment = _ev("humanizer", "OLD")
+    assert "thread" not in pre_enrichment
+    enriched = dict(_ev("impeccable", "agent-x"), thread="agent",
+                    agent_type="Explore", parent_session="NEW")
+
+    merged = merge_events([pre_enrichment], [enriched], found_sessions={"agent-x"})
+
+    assert merged == [pre_enrichment, enriched]
+
+
 def test_reingesting_the_same_session_does_not_double_count():
     # The session UUID is a natural idempotency key: re-reading a transcript that
     # is already in the store replaces its slice rather than appending a second

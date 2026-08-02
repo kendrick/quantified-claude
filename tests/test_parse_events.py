@@ -9,6 +9,13 @@ distinct invocation channels and tag each event with which one it came from:
   - channel="tool"  -> Claude invoked the Skill tool (a tool_use block)
   - channel="slash" -> the user typed /skillname (a <command-name> tag)
 
+It also has to say which side of the spawn boundary an event came from (§5).
+Subagent transcripts have always been in the walk, so 39 of 363 historical tool
+events were fired by a subagent and silently counted as main-thread usage.
+`thread` (plus `agent_type` and `parent_session`) is what makes "which skills
+does Claude reach for inside an Explore agent" answerable instead of averaged
+away.
+
 These fixtures use the real record shapes observed in
 ~/.claude/projects/**/*.jsonl, trimmed to the fields the parser reads.
 """
@@ -16,6 +23,27 @@ These fixtures use the real record shapes observed in
 from datetime import datetime, timezone
 
 from skill_usage import BUILTIN_CLI_COMMANDS, parse_events
+
+
+def _agent_tool_use(skill, ts="2026-07-14T10:00:00.000Z", **extra):
+    """Build a subagent-transcript record carrying one Skill tool_use.
+
+    Agent files self-identify on every record: `sessionId` is the PARENT
+    session's UUID, `attributionAgent` the subagent type, `isSidechain` the flag
+    that marks the file as off the main thread.
+    """
+    record = {
+        "type": "assistant",
+        "timestamp": ts,
+        "isSidechain": True,
+        "sessionId": "f7a73a51-parent-uuid",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": skill}}],
+        },
+    }
+    record.update(extra)
+    return record
 
 
 def _slash(name, ts="2026-06-17T12:00:00.000Z"):
@@ -51,6 +79,7 @@ def test_tool_use_block_yields_one_tool_channel_event():
             "session": "sess-abc",
             "host": "laptop",
             "channel": "tool",
+            "thread": "main",
         }
     ]
 
@@ -82,6 +111,7 @@ def test_slash_command_in_user_message_yields_slash_channel_event():
             "session": "sess-abc",
             "host": "laptop",
             "channel": "slash",
+            "thread": "main",
         }
     ]
 
@@ -197,3 +227,105 @@ def test_since_drops_events_before_cutoff_and_keeps_the_boundary_day():
     events = parse_events([before, on_cutoff, after], session="s", host="h", since=since)
 
     assert {e["skill"] for e in events} == {"doc-coauthoring", "impeccable"}
+
+
+def test_agent_thread_event_carries_the_type_and_the_parent_session():
+    # The payload the whole thread dimension exists for. Note what `session` is:
+    # the agent FILE's stem, not the parent UUID. merge_events overlays on that
+    # key, so two agent files sharing a parent would clobber each other if the
+    # parent's UUID went there. It gets its own field instead (§5).
+    events = parse_events(
+        [_agent_tool_use("systematic-debugging", attributionAgent="Explore")],
+        session="agent-a0d980fade", host="laptop", thread="agent",
+    )
+
+    assert events == [
+        {
+            "skill": "systematic-debugging",
+            "timestamp": "2026-07-14T10:00:00.000Z",
+            "session": "agent-a0d980fade",
+            "host": "laptop",
+            "channel": "tool",
+            "thread": "agent",
+            "agent_type": "Explore",
+            "parent_session": "f7a73a51-parent-uuid",
+        }
+    ]
+
+
+def test_main_thread_event_gains_thread_and_nothing_else():
+    # The other half of the contract. Enrichment is agent-only: a session file
+    # has no subagent type and no parent, and writing null keys for both would
+    # bloat every row in the store to describe an absence.
+    record = {
+        "type": "assistant",
+        "timestamp": "2026-07-14T10:00:00.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": "humanizer"}}],
+        },
+    }
+
+    (event,) = parse_events([record], session="sess-abc", host="laptop")
+
+    assert event["thread"] == "main"
+    assert "agent_type" not in event and "parent_session" not in event
+
+
+def test_agent_file_with_no_attribution_yields_a_null_type_rather_than_crashing():
+    # Coverage is 290/297 in real data; the misses are all 2.1.92-era files that
+    # predate attributionAgent. Those events are still real usage, so null is the
+    # honest answer. The field stays present so readers needn't special-case it.
+    record = _agent_tool_use("humanizer")
+    assert "attributionAgent" not in record
+
+    (event,) = parse_events([record], session="agent-old", host="h", thread="agent")
+
+    assert event["agent_type"] is None
+    assert event["parent_session"] == "f7a73a51-parent-uuid"
+
+
+def test_attribution_appearing_after_the_first_event_still_stamps_the_whole_file():
+    # Why the stamp happens after the walk instead of inline. Both fields are
+    # constant per file, but attributionAgent isn't guaranteed to ride the record
+    # that carries the first skill call. Stamping inline would leave every event
+    # before its first sighting unattributed.
+    early = _agent_tool_use("humanizer", ts="2026-07-14T10:00:00.000Z")
+    late = _agent_tool_use("impeccable", ts="2026-07-14T10:05:00.000Z",
+                           attributionAgent="general-purpose")
+
+    events = parse_events([early, late], session="agent-x", host="h", thread="agent")
+
+    assert [e["skill"] for e in events] == ["humanizer", "impeccable"]
+    assert all(e["agent_type"] == "general-purpose" for e in events)
+
+
+def test_a_since_cutoff_cannot_cost_the_file_its_identity():
+    # The enrichment scan runs ahead of the --since check on purpose. If the only
+    # record carrying attributionAgent falls before the cutoff, the events that
+    # survive it must still know which agent produced them.
+    old = _agent_tool_use("humanizer", ts="2026-06-01T00:00:00.000Z",
+                          attributionAgent="Explore")
+    recent = _agent_tool_use("impeccable", ts="2026-07-20T00:00:00.000Z")
+    since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    events = parse_events([old, recent], session="agent-x", host="h",
+                          since=since, thread="agent")
+
+    assert [e["skill"] for e in events] == ["impeccable"]
+    assert events[0]["agent_type"] == "Explore"
+
+
+def test_slash_events_on_the_agent_thread_are_enriched_too():
+    # Enrichment is stamped per event, not per channel. A /command inside a
+    # subagent is rare but the store shouldn't have a hole where its agent_type
+    # should be.
+    slash = _slash("humanizer")
+    slash["sessionId"] = "parent-uuid"
+    slash["attributionAgent"] = "worker-standard"
+
+    (event,) = parse_events([slash], session="agent-x", host="h", thread="agent")
+
+    assert event["channel"] == "slash"
+    assert event["agent_type"] == "worker-standard"
+    assert event["parent_session"] == "parent-uuid"
