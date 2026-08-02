@@ -25,7 +25,9 @@ Usage:
     python3 skill_usage.py render  --json     # dump the unioned events instead
 
 The data repo is also read from $SKILL_MOC_DATA_DIR, so --data-dir is optional
-once that's set. Assumes Python 3.9+. Pure stdlib, no dependencies.
+once that's set. $SKILL_MOC_HOST does the same for --host, which matters on any
+machine whose hostname isn't stable. Assumes Python 3.9+. Pure stdlib, no
+dependencies.
 """
 
 from __future__ import annotations
@@ -627,6 +629,21 @@ def resolve_data_dir(arg: str | None) -> Path:
              "private events repo.")
 
 
+def resolve_host(arg: str | None) -> str:
+    """
+    The store's partition key: --host, then $SKILL_MOC_HOST, then the hostname.
+
+    gethostname() is a convenient default, not a stable identity. On a Mac it
+    picks up whatever suffix DHCP hands out, so one laptop reports "name.lan" on
+    the home network and "name.local" on another. Because the host names the
+    store file and the overlay merges per file, a hostname that drifts silently
+    splits one machine's history across two files that render then counts as two
+    machines. Pin it to something that can't move (a hardware serial) on any
+    machine whose hostname isn't already fixed.
+    """
+    return arg or os.environ.get("SKILL_MOC_HOST") or socket.gethostname()
+
+
 def parse_since(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -670,7 +687,7 @@ def git_commit_push(data_dir: Path, host: str) -> None:
 
 def cmd_collect(args) -> None:
     data_dir = resolve_data_dir(args.data_dir)
-    host = args.host or socket.gethostname()
+    host = resolve_host(args.host)
     git_pull(data_dir)
     merged = run_collect(TRANSCRIPTS_ROOT, data_dir, host)
     git_commit_push(data_dir, host)
@@ -679,7 +696,7 @@ def cmd_collect(args) -> None:
 
 def cmd_render(args) -> None:
     data_dir = resolve_data_dir(args.data_dir)
-    host = args.host or socket.gethostname()
+    host = resolve_host(args.host)
     # render auto-collects first so the machine you're on is current the moment
     # you generate the MOC — no stale-by-one-run gap.
     git_pull(data_dir)
@@ -704,13 +721,15 @@ def main():
     pc = sub.add_parser("collect",
                         help="parse transcripts on disk, merge into the events store, sync")
     pc.add_argument("--data-dir", default=None, help="private events repo (or $SKILL_MOC_DATA_DIR)")
-    pc.add_argument("--host", default=None, help="override the hostname stamped on events")
+    pc.add_argument("--host", default=None,
+                    help="host key for the store (or $SKILL_MOC_HOST; default: hostname)")
     pc.set_defaults(func=cmd_collect)
 
     pr = sub.add_parser("render",
                         help="union the events stores and write the MOC (auto-collects first)")
     pr.add_argument("--data-dir", default=None, help="private events repo (or $SKILL_MOC_DATA_DIR)")
-    pr.add_argument("--host", default=None, help="override the hostname stamped on events")
+    pr.add_argument("--host", default=None,
+                    help="host key for the store (or $SKILL_MOC_HOST; default: hostname)")
     pr.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"MOC output path (default: {DEFAULT_OUT})")
     pr.add_argument("--since", default=None, help="only count usage on/after YYYY-MM-DD")

@@ -22,11 +22,16 @@
         <string>@DATADIR@</string>
     </array>
 
-    <!-- render shells out to git, which won't be on launchd's minimal PATH. -->
+    <!-- render shells out to git, which won't be on launchd's minimal PATH.
+         SKILL_MOC_HOST is resolved once at install time and baked in, so the
+         scheduled run keeps writing to the same store file even if the machine's
+         hostname later picks up a different DHCP suffix. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin</string>
+        <key>SKILL_MOC_HOST</key>
+        <string>@HOST@</string>
     </dict>
 
     <!-- Once a day at 10:05 local. render auto-collects first, so one run both
