@@ -47,7 +47,7 @@ def test_walks_every_session_and_reports_the_found_set(tmp_path):
     _write(root / "-Users-me-repo" / "sess1.jsonl", _tool_use("humanizer"))
     _write(root / "-Users-me-repo" / "sess2.jsonl", _slash("doc-coauthoring"))
 
-    events, found = collect_from_disk(root, host="laptop")
+    events, _usage, found = collect_from_disk(root, host="laptop")
 
     assert found == {"sess1", "sess2"}
     assert {e["skill"] for e in events} == {"humanizer", "doc-coauthoring"}
@@ -65,7 +65,7 @@ def test_session_present_but_eventless_still_counts_as_found(tmp_path):
            {"type": "user", "timestamp": "2026-06-17T09:00:00.000Z",
             "message": {"role": "user", "content": "just chatting, no skills"}})
 
-    events, found = collect_from_disk(root, host="laptop")
+    events, _usage, found = collect_from_disk(root, host="laptop")
 
     assert found == {"quiet"}
     assert events == []
@@ -88,7 +88,7 @@ def test_subagent_transcript_beside_a_session_is_classified_as_the_agent_thread(
                 {"type": "tool_use", "name": "Skill",
                  "input": {"skill": "systematic-debugging"}}]}})
 
-    events, found = collect_from_disk(root, host="laptop")
+    events, _usage, found = collect_from_disk(root, host="laptop")
 
     assert found == {"sess1", "agent-x"}
     by_skill = {e["skill"]: e for e in events}
@@ -108,6 +108,6 @@ def test_an_agent_file_outside_a_subagents_dir_is_still_classified_by_its_stem(t
     root = tmp_path / "projects"
     _write(root / "-Users-me-repo" / "agent-loose.jsonl", _tool_use("impeccable"))
 
-    events, _ = collect_from_disk(root, host="laptop")
+    events, _usage, _found = collect_from_disk(root, host="laptop")
 
     assert [e["thread"] for e in events] == ["agent"]

@@ -84,6 +84,18 @@ BUILTIN_CLI_COMMANDS = frozenset({
     "terminal-setup", "todos", "upgrade", "vim",
 })
 
+# The four token counters, named exactly as message.usage names them, so
+# verifying a number against a transcript is a grep rather than a translation.
+# usage carries more (server_tool_use, service_tier, a per-iteration breakdown),
+# but these four are the ones that sum to a run's total: the design doc verified
+# totalTokens == input + output + cache_creation + cache_read (§3).
+USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
 
 # --------------------------------------------------------------------------- #
 # Transcript parsing
@@ -257,27 +269,135 @@ def parse_events(records, session: str, host: str, since: datetime | None = None
     return events
 
 
+def parse_usage(records, session: str, host: str, thread: str = "main",
+                since: datetime | None = None):
+    """
+    Reduce one session's transcript records into per-model, per-skill token rows.
+
+    Assistant records carry both `message.model` and `message.usage`, and
+    `attributionSkill` rides on exactly those records, so tokens-per-skill and
+    tokens-per-model fall straight out of what's already on disk.
+
+    The one thing that makes or breaks the count is deduplication. Streaming and
+    content-block splits mean a single `message.id` can appear on up to 24
+    consecutive records, each repeating an identical usage block. Summing
+    naively inflates every number by that factor, so the first sighting of an id
+    wins and the rest are skipped.
+
+    Rows are aggregates per (model, skill), not one row per message. The
+    session-keyed overlay recomputes a session's whole slice on every re-parse,
+    so aggregating early costs no auditability while keeping the store small and
+    its diffs readable (design doc §4).
+    """
+    agent_type = None
+    parent_session = None
+    seen_message_ids = set()
+    buckets = {}
+
+    for record in records:
+        # Same enrichment scan as parse_events, and ahead of the cutoff for the
+        # same reason: a --since that skips the opening records mustn't cost the
+        # file its identity.
+        if thread == "agent":
+            if agent_type is None:
+                agent_type = record.get("attributionAgent")
+            if parent_session is None:
+                parent_session = record.get("sessionId")
+
+        ts = record_timestamp(record)
+        if since is not None and _before_cutoff(ts, since):
+            continue
+
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+
+        # "<synthetic>" is Claude Code's own bookkeeping, not a billed call.
+        model = message.get("model")
+        if model == "<synthetic>":
+            continue
+
+        message_id = message.get("id")
+        if message_id is not None:
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+        # An id-less record can't be deduped, so it's counted. Double-counting a
+        # rare malformed record beats dropping usage we know happened.
+
+        key = (model, record.get("attributionSkill"))
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = buckets[key] = dict.fromkeys(USAGE_TOKEN_KEYS, 0)
+            bucket["messages"] = 0
+            bucket["timestamp"] = None
+        bucket["messages"] += 1
+        for field in USAGE_TOKEN_KEYS:
+            value = usage.get(field)
+            bucket[field] += value if isinstance(value, int) else 0
+        # Lexicographic max works because these are ISO-8601 in a fixed format.
+        if ts is not None and (bucket["timestamp"] is None or ts > bucket["timestamp"]):
+            bucket["timestamp"] = ts
+
+    rows = []
+    # None sorts against str in 3.9 only if we coerce, and a null skill is the
+    # common case (most assistant turns aren't inside a skill).
+    for (model, skill) in sorted(buckets, key=lambda k: (k[0] or "", k[1] or "")):
+        bucket = buckets[(model, skill)]
+        row = {
+            "session": session,
+            "host": host,
+            "thread": thread,
+            "model": model,
+            "skill": skill,
+            "messages": bucket["messages"],
+        }
+        row.update({field: bucket[field] for field in USAGE_TOKEN_KEYS})
+        row["timestamp"] = bucket["timestamp"]
+        if thread == "agent":
+            row["agent_type"] = agent_type
+            row["parent_session"] = parent_session
+        rows.append(row)
+    return rows
+
+
 def run_collect(transcripts_root: Path, data_dir: Path, host: str,
                 since: datetime | None = None) -> list:
     """
     The data flow of `collect`, with no git involved.
 
-    Read this host's existing store, parse the transcripts currently on disk,
-    overlay the re-read sessions onto the store, and write it back. Returns the
-    merged events. cmd_collect wraps this with best-effort git pull/commit/push;
-    keeping the git out here is what makes the whole pipeline unit-testable.
+    Read this host's existing stores, parse the transcripts currently on disk,
+    overlay the re-read sessions onto each store, and write them back. Returns
+    the merged events. cmd_collect wraps this with best-effort git
+    pull/commit/push; keeping the git out here is what makes the whole pipeline
+    unit-testable.
+
+    Every stream overlays identically because they share a merge key: the
+    session. One `found_sessions` therefore governs all of them, which is what
+    keeps a pruned session's tokens alive alongside its skill events.
     """
-    store_path = store_dir(data_dir) / f"{host}.jsonl"
-    stored = read_store(store_path)
-    fresh, found_sessions = collect_from_disk(transcripts_root, host, since)
-    merged = merge_events(stored, fresh, found_sessions)
-    write_store(store_path, merged)
+    fresh_events, fresh_usage, found_sessions = collect_from_disk(
+        transcripts_root, host, since)
+    merged = overlay_store(store_dir(data_dir, "events") / f"{host}.jsonl",
+                           fresh_events, found_sessions)
+    overlay_store(store_dir(data_dir, "usage") / f"{host}.jsonl",
+                  fresh_usage, found_sessions)
+    return merged
+
+
+def overlay_store(path: Path, fresh, found_sessions) -> list:
+    """Read one store, overlay this run's rows onto it, write it back."""
+    merged = merge_events(read_store(path), fresh, found_sessions)
+    write_store(path, merged)
     return merged
 
 
 def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None = None):
     """
-    Walk a transcripts tree and reduce it to (events, found_sessions).
+    Walk a transcripts tree and reduce it to (events, usage_rows, found_sessions).
 
     Every *.jsonl under the root is one session, named by its stem (the session
     UUID). We record the session in `found_sessions` whether or not it yielded
@@ -290,7 +410,8 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
     rather than filtered: a skill call inside an Explore agent is real usage, it
     just belongs to a different thread (§5).
     """
-    fresh = []
+    fresh_events = []
+    fresh_usage = []
     found_sessions = set()
     for jsonl in sorted(transcripts_root.rglob("*.jsonl")):
         session = jsonl.stem
@@ -300,10 +421,16 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
         # future layout moves these files but keeps naming them agent-<id>.
         # Main-thread files are named by UUID, so the prefix can't false-positive.
         is_agent = jsonl.parent.name == "subagents" or jsonl.stem.startswith("agent-")
-        records = iter_jsonl(jsonl)
-        fresh.extend(parse_events(records, session=session, host=host, since=since,
-                                  thread="agent" if is_agent else "main"))
-    return fresh, found_sessions
+        thread = "agent" if is_agent else "main"
+        # Materialized once and handed to both parsers. Two small pure functions
+        # over one list read far better than one fused loop doing both jobs, and
+        # the file is read from disk only once either way.
+        records = list(iter_jsonl(jsonl))
+        fresh_events.extend(parse_events(records, session=session, host=host,
+                                         since=since, thread=thread))
+        fresh_usage.extend(parse_usage(records, session=session, host=host,
+                                       thread=thread, since=since))
+    return fresh_events, fresh_usage, found_sessions
 
 
 def read_store(path: Path) -> list:
@@ -320,9 +447,9 @@ def read_store(path: Path) -> list:
     return list(iter_jsonl(path))
 
 
-def store_dir(data_dir: Path) -> Path:
-    """The events/ subdir inside the private data repo. One file per host."""
-    return data_dir / "events"
+def store_dir(data_dir: Path, name: str = "events") -> Path:
+    """One stream's subdir inside the private data repo. One file per host."""
+    return data_dir / name
 
 
 def union_stores(data_dir: Path) -> list:
@@ -679,7 +806,7 @@ def git_pull(data_dir: Path) -> None:
 
 
 def git_commit_push(data_dir: Path, host: str) -> None:
-    _git(data_dir, "add", "events")
+    _git(data_dir, "add", "events", "usage")
     # An empty commit (nothing changed) exits non-zero; best-effort swallows it.
     _git(data_dir, "commit", "-m", f"collect: update {host}")
     _git(data_dir, "push")
