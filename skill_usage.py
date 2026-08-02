@@ -96,6 +96,11 @@ USAGE_TOKEN_KEYS = (
     "cache_read_input_tokens",
 )
 
+# Spawning a subagent is an "Agent" tool_use. "Task" is the pre-rename spelling
+# and no longer appears in fresh transcripts, but old ones on disk still carry
+# it, and a spawn we fail to recognize is a run missing from the store.
+AGENT_TOOL_NAMES = ("Agent", "Task")
+
 
 # --------------------------------------------------------------------------- #
 # Transcript parsing
@@ -117,21 +122,30 @@ def iter_jsonl(path: Path):
         return
 
 
-def find_tool_uses(obj, target_name: str):
+def find_tool_uses(obj, target_name):
     """
     Recursively walk an arbitrary JSON structure and yield every dict that looks
     like a tool_use block for `target_name`. Defensive on purpose: the record
     shape varies by Claude Code version, so we don't assume a fixed path.
+
+    `target_name` is one name or a collection of them. The collection form is
+    for tools that have been renamed across versions, where old transcripts
+    still hold the old spelling and both have to keep counting.
     """
+    names = {target_name} if isinstance(target_name, str) else set(target_name)
+    yield from _walk_tool_uses(obj, names)
+
+
+def _walk_tool_uses(obj, names):
     if isinstance(obj, dict):
         is_tool_use = obj.get("type") == "tool_use" or "tool_use" in str(obj.get("type", ""))
-        if is_tool_use and obj.get("name") == target_name:
+        if is_tool_use and obj.get("name") in names:
             yield obj
         for v in obj.values():
-            yield from find_tool_uses(v, target_name)
+            yield from _walk_tool_uses(v, names)
     elif isinstance(obj, list):
         for item in obj:
-            yield from find_tool_uses(item, target_name)
+            yield from _walk_tool_uses(item, names)
 
 
 def extract_skill_name(tool_use: dict) -> str:
@@ -364,6 +378,84 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
     return rows
 
 
+def _result_tool_use_id(record: dict) -> str | None:
+    """The tool_use a tool_result record is answering, or None."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("tool_use_id"):
+                return block["tool_use_id"]
+    return None
+
+
+def parse_spawns(records, session: str, host: str, since: datetime | None = None):
+    """
+    Reduce one PARENT session's records into one row per subagent it spawned.
+
+    The parent records each spawn twice: an `Agent` tool_use carrying what was
+    requested, and a result carrying `toolUseResult` with what happened. Two
+    passes, because the result can be read before its tool_use in a partial or
+    reordered file, and an unjoined row would silently lose `requested_model`.
+
+    Coverage here is partial by nature (`agentType` and `totalTokens` are absent
+    on roughly a seventh of real results, all async spawns), so this stream is an
+    enrichment-and-fallback layer rather than ground truth. The agent's own file
+    holds the authoritative tokens and model. What lives ONLY here is `toolStats`
+    (lines added and removed, per-tool counts), `status`, and the `agentId` link
+    that ties a run to its spawning session even after the agent file is pruned.
+
+    PRIVACY: `toolUseResult` also carries `prompt`, `description`, and `content`,
+    and in real transcripts those routinely hold client context. None of them may
+    ever reach a row. Everything copied out is named explicitly below for exactly
+    that reason: a field is stored because it was chosen, never because it
+    happened to be in the source dict (§4).
+    """
+    requested = {}
+    for record in records:
+        for tool_use in find_tool_uses(record, AGENT_TOOL_NAMES):
+            tool_use_id = tool_use.get("id")
+            if tool_use_id is None:
+                continue
+            spawn_input = tool_use.get("input")
+            if not isinstance(spawn_input, dict):
+                spawn_input = {}
+            requested[tool_use_id] = {
+                "subagent_type": spawn_input.get("subagent_type"),
+                "model": spawn_input.get("model"),
+            }
+
+    rows = []
+    for record in records:
+        result = record.get("toolUseResult")
+        if not isinstance(result, dict) or "agentId" not in result:
+            continue
+        ts = record_timestamp(record)
+        if since is not None and _before_cutoff(ts, since):
+            continue
+
+        spawn = requested.get(_result_tool_use_id(record), {})
+        rows.append({
+            "session": session,
+            "host": host,
+            "timestamp": ts,
+            "agent_id": result.get("agentId"),
+            # The fallback is what restores full coverage: agentType is missing
+            # from async results, but the spawning tool_use always asked for one.
+            "agent_type": result.get("agentType") or spawn.get("subagent_type"),
+            "requested_model": spawn.get("model"),
+            "resolved_model": result.get("resolvedModel"),
+            "status": result.get("status"),
+            "total_tokens": result.get("totalTokens"),
+            "duration_ms": result.get("totalDurationMs"),
+            "tool_use_count": result.get("totalToolUseCount"),
+            # Passed through verbatim: it's a small counter map the harness owns,
+            # and freezing its keys here would drop new ones on a version bump.
+            "tool_stats": result.get("toolStats"),
+        })
+    return rows
+
+
 def run_collect(transcripts_root: Path, data_dir: Path, host: str,
                 since: datetime | None = None) -> list:
     """
@@ -379,12 +471,14 @@ def run_collect(transcripts_root: Path, data_dir: Path, host: str,
     session. One `found_sessions` therefore governs all of them, which is what
     keeps a pruned session's tokens alive alongside its skill events.
     """
-    fresh_events, fresh_usage, found_sessions = collect_from_disk(
+    fresh_events, fresh_usage, fresh_spawns, found_sessions = collect_from_disk(
         transcripts_root, host, since)
     merged = overlay_store(store_dir(data_dir, "events") / f"{host}.jsonl",
                            fresh_events, found_sessions)
     overlay_store(store_dir(data_dir, "usage") / f"{host}.jsonl",
                   fresh_usage, found_sessions)
+    overlay_store(store_dir(data_dir, "agents") / f"{host}.jsonl",
+                  fresh_spawns, found_sessions)
     return merged
 
 
@@ -412,6 +506,7 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
     """
     fresh_events = []
     fresh_usage = []
+    fresh_spawns = []
     found_sessions = set()
     for jsonl in sorted(transcripts_root.rglob("*.jsonl")):
         session = jsonl.stem
@@ -430,7 +525,11 @@ def collect_from_disk(transcripts_root: Path, host: str, since: datetime | None 
                                          since=since, thread=thread))
         fresh_usage.extend(parse_usage(records, session=session, host=host,
                                        thread=thread, since=since))
-    return fresh_events, fresh_usage, found_sessions
+        # Spawns are recorded by the PARENT, so an agent file has none to give.
+        if not is_agent:
+            fresh_spawns.extend(parse_spawns(records, session=session, host=host,
+                                             since=since))
+    return fresh_events, fresh_usage, fresh_spawns, found_sessions
 
 
 def read_store(path: Path) -> list:
@@ -806,7 +905,7 @@ def git_pull(data_dir: Path) -> None:
 
 
 def git_commit_push(data_dir: Path, host: str) -> None:
-    _git(data_dir, "add", "events", "usage")
+    _git(data_dir, "add", "events", "usage", "agents")
     # An empty commit (nothing changed) exits non-zero; best-effort swallows it.
     _git(data_dir, "commit", "-m", f"collect: update {host}")
     _git(data_dir, "push")
