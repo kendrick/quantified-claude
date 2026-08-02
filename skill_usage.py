@@ -890,7 +890,8 @@ def format_skill_link(name: str, inventory: dict, links: str, out_dir: Path) -> 
 
 
 def run_render(data_dir: Path, out_path: Path, links: str = "relative",
-               since: datetime | None = None, inventory: dict | None = None) -> str:
+               since: datetime | None = None, inventory: dict | None = None,
+               report_path: Path | None = None) -> str:
     """
     The data flow of `render`, with no git: union every host's store, optionally
     drop events before --since, join against the skills inventory, and write the
@@ -915,6 +916,17 @@ def run_render(data_dir: Path, out_path: Path, links: str = "relative",
                      out_dir=out_path.parent)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(moc, encoding="utf-8")
+
+    # The report is a second local artifact, written only when asked for so the
+    # existing render tests keep asserting about one file.
+    if report_path is not None:
+        spawn_rows = union_stores(data_dir, "agents")
+        if since is not None:
+            spawn_rows = [r for r in spawn_rows
+                          if not _before_cutoff(r.get("timestamp"), since)]
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(render_report(usage_rows, spawn_rows, events),
+                               encoding="utf-8")
     return moc
 
 
@@ -1042,10 +1054,174 @@ def render_moc(events, inventory, usage_rows=None, links: str = "relative",
 
 
 # --------------------------------------------------------------------------- #
+# Report rendering
+# --------------------------------------------------------------------------- #
+
+def short_model(model) -> str:
+    """
+    claude-haiku-4-5-20251001 -> haiku-4-5. Render time only.
+
+    The store keeps the raw model string, because that's what the transcript
+    said and a dated id is the only way to tell two releases of one model apart
+    later. Shortening is presentation, so it happens here and never on disk.
+    """
+    if not model:
+        return "<unknown>"
+    name = model[len("claude-"):] if model.startswith("claude-") else model
+    return re.sub(r"-\d{8}$", "", name)
+
+
+def _median(values):
+    """Median of a list, or None when empty. Even counts average the middle pair."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _row_tokens(row) -> int:
+    """The four-bucket total for one usage row."""
+    return sum(row.get(field) or 0 for field in USAGE_TOKEN_KEYS)
+
+
+def render_models_by_thread(usage_rows) -> list:
+    """
+    Per model, messages and tokens split across the spawn boundary.
+
+    The section that pays for the module. The main thread and its subagents don't
+    run the same mix, and until both sides are counted separately that difference
+    averages away into a single per-model number that describes neither.
+    """
+    lines = ["## Models × Thread", ""]
+    if not usage_rows:
+        return lines + ["*(no usage rows yet)*", ""]
+
+    totals = {}
+    for row in usage_rows:
+        model = short_model(row.get("model"))
+        thread = row.get("thread") or "main"
+        bucket = totals.setdefault(model, {"main": [0, 0], "agent": [0, 0]})
+        side = bucket.get(thread)
+        if side is None:
+            continue
+        side[0] += row.get("messages") or 0
+        side[1] += _row_tokens(row)
+
+    lines += ["| Model | Main msgs | Main tokens | Agent msgs | Agent tokens | Total |",
+              "|---|---:|---:|---:|---:|---:|"]
+    for model in sorted(totals, key=lambda m: -sum(s[1] for s in totals[m].values())):
+        main, agent = totals[model]["main"], totals[model]["agent"]
+        lines.append(
+            f"| {model} | {main[0]} | {fmt_tokens(main[1])} | {agent[0]} | "
+            f"{fmt_tokens(agent[1])} | {fmt_tokens(main[1] + agent[1])} |")
+    return lines + [""]
+
+
+def render_agent_types(spawn_rows, usage_rows=None) -> list:
+    """
+    Per subagent type: how often it runs, how often it finishes, what it costs.
+
+    Token totals prefer the spawn row's `total_tokens`, falling back to the
+    agent's own usage rows when the spawn row lacks it. That fallback matters
+    because async spawns report no totals at all, so without it a whole class of
+    run would read as free.
+
+    Completion is measured over RESOLVED runs only. An `async_launched` spawn is
+    one whose parent recorded the launch and never saw the outcome, so counting
+    it as not-completed turns "we didn't look" into "it failed". On this machine
+    that's the difference between general-purpose reading as 5% and as 100%:
+    16 of its 17 spawns were fire-and-forget. The async count gets its own
+    column instead, where it's information rather than a false negative.
+    """
+    lines = ["## Agent Types", ""]
+    if not spawn_rows:
+        return lines + ["*(no spawn rows yet)*", ""]
+
+    # agent-<id> is the agent file's stem, which is how its usage rows are keyed.
+    by_agent_session = {}
+    for row in usage_rows or []:
+        session = row.get("session")
+        if session:
+            by_agent_session[session] = by_agent_session.get(session, 0) + _row_tokens(row)
+
+    types = {}
+    for spawn in spawn_rows:
+        entry = types.setdefault(spawn.get("agent_type") or "<unknown>",
+                                 {"spawns": 0, "completed": 0, "async": 0,
+                                  "tokens": [], "added": 0, "removed": 0})
+        entry["spawns"] += 1
+        status = spawn.get("status")
+        if status == "async_launched":
+            entry["async"] += 1
+        elif status == "completed":
+            entry["completed"] += 1
+        tokens = spawn.get("total_tokens")
+        if not tokens:
+            tokens = by_agent_session.get(f"agent-{spawn.get('agent_id')}")
+        if tokens:
+            entry["tokens"].append(tokens)
+        stats = spawn.get("tool_stats") or {}
+        entry["added"] += stats.get("linesAdded") or 0
+        entry["removed"] += stats.get("linesRemoved") or 0
+
+    lines += ["| Agent type | Spawns | Async | Completed | Median tokens | "
+              "Total tokens | Lines +/- |",
+              "|---|---:|---:|---:|---:|---:|---|"]
+    for name in sorted(types, key=lambda n: -types[n]["spawns"]):
+        e = types[name]
+        resolved = e["spawns"] - e["async"]
+        # A type whose every spawn was fire-and-forget has no completion rate to
+        # report. A dash says that; 0% would say they all failed.
+        rate = f"{100 * e['completed'] // resolved}%" if resolved else "—"
+        lines.append(
+            f"| {name} | {e['spawns']} | {e['async']} | {rate} | "
+            f"{fmt_tokens(_median(e['tokens']))} | "
+            f"{fmt_tokens(sum(e['tokens']))} | +{e['added']} / -{e['removed']} |")
+    return lines + [""]
+
+
+def render_report(usage_rows, spawn_rows, skill_events) -> str:
+    """
+    Build the exploration artifact that sits beside the MOC.
+
+    Regenerated locally like the MOC and never synced, on the same three-artifact
+    logic: it's derived, disposable, and specific to the machine that wrote it.
+    Every section degrades to a note rather than an error when its stream is
+    empty, because a fresh host has all four stores missing and still has to
+    render something.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    sessions = {e["session"] for e in skill_events if event_thread(e) == "main"}
+    lines = [
+        "---",
+        "title: Claude Code Usage Report",
+        f"generated: {now}",
+        "tags: [report, claude-code, telemetry]",
+        "---",
+        "",
+        "# Claude Code Usage Report",
+        "",
+        f"*Generated {now} from {len(usage_rows or [])} usage rows and "
+        f"{len(spawn_rows or [])} agent runs across {len(sessions)} sessions.*",
+        "",
+    ]
+    lines += render_models_by_thread(usage_rows)
+    lines += render_agent_types(spawn_rows, usage_rows)
+    lines += ["---", "*Built by skill_usage.py*", ""]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
 # CLI glue: data-dir resolution, best-effort git, subcommands
 # --------------------------------------------------------------------------- #
 
 DEFAULT_OUT = Path("~/.claude/skills/skill-usage-moc.md")
+# The report sits beside the MOC and follows the same three-artifact rule:
+# generated locally, never synced, safe to delete.
+DEFAULT_REPORT_OUT = Path("~/.claude/skills/claude-usage-report.md")
 
 
 def resolve_data_dir(arg: str | None) -> Path:
@@ -1140,13 +1316,21 @@ def cmd_render(args) -> None:
     git_commit_push(data_dir, host)
 
     if args.json:
-        json.dump(union_stores(data_dir), sys.stdout, indent=2)
+        # Keyed by stream rather than a bare events array. There are four stores
+        # now, and a bare list can only ever be one of them. This is a breaking
+        # change to the debug surface; see CHANGELOG.
+        json.dump({name: union_stores(data_dir, name)
+                   for name in ("events", "usage", "agents", "stats")},
+                  sys.stdout, indent=2)
         print()
         return
 
     out = args.out.expanduser()
-    run_render(data_dir, out, links=args.links, since=parse_since(args.since))
+    report_out = args.report_out.expanduser()
+    run_render(data_dir, out, links=args.links, since=parse_since(args.since),
+               report_path=report_out)
     print(f"render: wrote MOC -> {out}", file=sys.stderr)
+    print(f"render: wrote report -> {report_out}", file=sys.stderr)
 
 
 def main():
@@ -1168,6 +1352,8 @@ def main():
                     help="host key for the store (or $SKILL_MOC_HOST; default: hostname)")
     pr.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"MOC output path (default: {DEFAULT_OUT})")
+    pr.add_argument("--report-out", type=Path, default=DEFAULT_REPORT_OUT,
+                    help=f"usage report output path (default: {DEFAULT_REPORT_OUT})")
     pr.add_argument("--since", default=None, help="only count usage on/after YYYY-MM-DD")
     pr.add_argument("--links", choices=["relative", "wikilink"], default="relative",
                     help="how skill names link to SKILL.md (default: relative)")
