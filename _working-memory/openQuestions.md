@@ -3,10 +3,6 @@
 <!-- Things that are unresolved and should not be guessed at. -->
 <!-- Agents encountering these should ask rather than assume. -->
 
-## Are the tool and slash channels really disjoint?
-
-The 2026-06-17 design (§9) flagged this and asked for it to be settled before the two channels get summed: "confirm tool vs slash are disjoint events, not the same action recorded twice." The evidence leaned that way, since `speckit-plan` measured 34 slash against 0 tool, but the check was never written down as done. Meanwhile `render_moc` does sum them, so every Uses number in every MOC rendered so far depends on the answer. If they turn out to overlap, the fix is at render time and the store needs no migration. Someone should measure it properly and either record the result or fix the sum.
-
 ## Is the tool distributed as a template or as a clone?
 
 The design (§2) calls the tool repo a public GitHub *template* repo, and its build order still lists "mark it a template" as outstanding. The README tells you to `git clone` it and `git pull` to update. Those are different models, and they imply different things about how someone else's fork tracks upstream. The repo is public today but isn't marked a template, so the README currently describes reality. Pick one on purpose rather than letting the design doc and the README keep disagreeing.

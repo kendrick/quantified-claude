@@ -18,7 +18,7 @@ A skill-usage event, as `parse_events` writes it today:
 
 - `skill` — the identifier verbatim as the transcript gave it, including any `plugin:skill` namespace. Normalization to the bare inventory key happens at render time in `canonical_skill`, never on disk.
 - `session` — the transcript file's stem, always. This is the merge key; see the invariant below.
-- `channel` — `tool` when Claude invoked the Skill tool, `slash` when you typed `/skillname`. `render_moc` adds the two together to get a skill's total Uses, which assumes they're disjoint records rather than two views of one action. The evidence says they are, but the check was never formally done. See `openQuestions.md`.
+- `channel` — `tool` when Claude invoked the Skill tool, `slash` when you typed `/skillname`. `render_moc` adds the two together to get a skill's total Uses, which is safe: they were measured disjoint on 2026-08-02 (zero of 224 slash events co-occur with a same-skill tool event inside five minutes). See `decisionLog.md`. Storing the channel rather than a pre-summed total is what left that decision open until it could be checked, and what would let render stop summing if a future release changes how slash commands are recorded.
 - `timestamp` — may be `null`. A record with no parseable timestamp is never dropped by the `--since` filter, on the grounds that losing a real invocation to a format we failed to parse is worse than letting one slip past the cutoff.
 
 Readers must tolerate missing keys. Every field is read through `.get()` so rows written by an older version stay valid forever, and fields are only ever added, never renamed or repurposed. `project` was removed on purpose and must not come back; see `decisionLog.md`.

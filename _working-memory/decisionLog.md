@@ -14,6 +14,16 @@ Each entry follows this shape:
 **Alternatives considered:** What was rejected, and why.
 ```
 
+## 2026-08-02: The tool and slash channels are disjoint, so summing them is correct
+
+**Source:** measured against the union events store (879 events, both hosts)
+
+**Context:** The 2026-06-17 design (§9) asked for this before the channels got summed, and it was never recorded as done. `render_moc` sums them anyway, so every Uses number ever printed depended on the answer.
+
+**Decision:** They're disjoint. Of 224 slash events, zero have a same-skill tool event in the same session within 60 seconds, and still zero at five minutes. Pairings only start appearing at the one-hour window (11) and the one-day window (32), which is the spacing of separate invocations in a long session rather than one action recorded twice. A slash that also emitted a `tool_use` would land milliseconds apart. Summing stands, and no MOC needs revisiting.
+
+**Alternatives considered:** Deduplicating at render was the fallback if they overlapped. Unnecessary. Worth re-running after a Claude Code release changes how slash commands are recorded, since this is a property of the transcript format rather than of the parser.
+
 ## 2026-07-14: Store token usage as per-session aggregates, not per-message rows
 
 **Source:** `docs/plans/2026-07-14-agents-models-tokens-design.md` §4
