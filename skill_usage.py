@@ -1124,10 +1124,13 @@ def render_agent_types(spawn_rows, usage_rows=None) -> list:
     """
     Per subagent type: how often it runs, how often it finishes, what it costs.
 
-    Token totals prefer the spawn row's `total_tokens`, falling back to the
-    agent's own usage rows when the spawn row lacks it. That fallback matters
-    because async spawns report no totals at all, so without it a whole class of
-    run would read as free.
+    Tokens come from the agent's OWN usage rows, summed across the run, and fall
+    back to the spawn row's `total_tokens` only when no usage rows survive. That
+    ordering is the opposite of what the module 2 plan called for, and it's
+    deliberate: `toolUseResult.totalTokens` is the LAST message's usage, so it
+    measures the context the run ended at rather than what it consumed. On one
+    57-message run that's 109,592 against 4,431,358. Summing the former across
+    spawns adds up ending context sizes, which answers no question anyone has.
 
     Completion is measured over RESOLVED runs only. An `async_launched` spawn is
     one whose parent recorded the launch and never saw the outcome, so counting
@@ -1158,9 +1161,9 @@ def render_agent_types(spawn_rows, usage_rows=None) -> list:
             entry["async"] += 1
         elif status == "completed":
             entry["completed"] += 1
-        tokens = spawn.get("total_tokens")
+        tokens = by_agent_session.get(f"agent-{spawn.get('agent_id')}")
         if not tokens:
-            tokens = by_agent_session.get(f"agent-{spawn.get('agent_id')}")
+            tokens = spawn.get("total_tokens")
         if tokens:
             entry["tokens"].append(tokens)
         stats = spawn.get("tool_stats") or {}
@@ -1337,6 +1340,122 @@ def render_report(usage_rows, spawn_rows, skill_events) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Audit
+# --------------------------------------------------------------------------- #
+
+def _model_diverged(requested, resolved) -> bool:
+    """
+    True when a requested model didn't expand to the family it named.
+
+    `requested` is the shorthand you pass to the Agent tool ("opus", "haiku");
+    `resolved` is the full id it became ("claude-opus-5[1m]"). Those differ as
+    strings on every spawn, so comparing them raw makes the tripwire useless.
+    What matters is whether the shorthand still names the family that ran.
+    """
+    if not requested or not resolved:
+        return False
+    return not short_model(resolved).startswith(requested)
+
+
+def audit_report(events, usage_rows, spawn_rows) -> str:
+    """
+    Cross-check the streams against each other and print what disagrees.
+
+    Module 1 kept a loud `<unknown>` bucket so a parser regression after a
+    Claude Code bump showed up immediately instead of quietly corrupting counts.
+    This extends that idea across all four streams, and makes it rerunnable: the
+    one-off battery from the module 2 rollout becomes something you run after
+    every version bump.
+
+    Read-only and always exit 0. It reports; it doesn't judge. A number moving
+    here is a prompt to go look, not proof of a bug, because most of these
+    counts move for legitimate reasons too (a pruned transcript, a new agent
+    type, a model that genuinely got rerouted).
+
+    The token check is NOT an equality test, though the module 2 plan expected
+    one. `totalTokens == input + output + cache_creation + cache_read` holds for
+    a single message's usage block, and `toolUseResult.totalTokens` is the LAST
+    message's block: the context the run ended at, not what it consumed getting
+    there. Measured on one 57-message run, totalTokens was 109,592 against
+    4,431,358 summed across the file. Aggregate rows can't reconstruct "the last
+    message", so equality is unavailable here by construction.
+
+    What IS checkable is the ordering: a run's final context can never exceed
+    what it processed in total. A violation means one of the two parsers moved.
+    """
+    lines = ["# Audit", ""]
+
+    # Agent-file usage rows key on the agent file's stem, which is agent-<id>.
+    agent_tokens = {}
+    for row in usage_rows:
+        session = row.get("session")
+        if session:
+            agent_tokens[session] = agent_tokens.get(session, 0) + _row_tokens(row)
+
+    compared = 0
+    mismatches = []
+    orphans = 0
+    for spawn in spawn_rows:
+        session = f"agent-{spawn.get('agent_id')}"
+        if session not in agent_tokens:
+            orphans += 1
+            continue
+        reported = spawn.get("total_tokens")
+        if not reported:
+            continue
+        compared += 1
+        summed = agent_tokens[session]
+        if reported > summed:
+            mismatches.append((session, reported, summed))
+
+    lines += ["## Token cross-check", ""]
+    if compared:
+        lines.append(f"{compared} spawn/agent-file pairs compared, "
+                     f"{len(mismatches)} where the reported final context "
+                     f"exceeds the tokens the run processed.")
+    else:
+        lines.append("No comparable pairs. This host has no spawn rows whose "
+                     "agent file is also in the store.")
+    for session, reported, summed in mismatches[:20]:
+        lines.append(f"  {session}: spawn reports {reported}, usage rows only "
+                     f"sum to {summed}")
+    if len(mismatches) > 20:
+        lines.append(f"  ...and {len(mismatches) - 20} more.")
+    lines.append("")
+
+    # Requested vs resolved model. The requested side is a shorthand you type
+    # ("opus"), the resolved side the full dated id it expanded to
+    # ("claude-opus-5[1m]"), so a raw string compare flags every single spawn.
+    # Divergence means the shorthand didn't expand to the family it names, which
+    # is real rerouting and wants eyes.
+    divergent = [s for s in spawn_rows if _model_diverged(s.get("requested_model"),
+                                                          s.get("resolved_model"))]
+
+    agent_events = [e for e in events if event_thread(e) == "agent"]
+    lines += ["## Tripwires", ""]
+    for label, count in (
+        ("skill events in the <unknown> bucket",
+         sum(1 for e in events if e.get("skill") == "<unknown>")),
+        ("usage rows with no model", sum(1 for r in usage_rows if not r.get("model"))),
+        ("agent-thread events missing agent_type",
+         sum(1 for e in agent_events if not e.get("agent_type"))),
+        ("spawn rows whose agent file was never seen", orphans),
+        ("spawns where the resolved model differs from the requested one",
+         len(divergent)),
+    ):
+        lines.append(f"- {label}: {count}")
+    for spawn in divergent[:10]:
+        lines.append(f"  {spawn.get('agent_id')}: requested "
+                     f"{spawn['requested_model']}, resolved {spawn['resolved_model']}")
+
+    lines += ["", "## Coverage", ""]
+    lines += [f"- events: {len(events)}",
+              f"- usage rows: {len(usage_rows)}",
+              f"- spawn rows: {len(spawn_rows)}"]
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
 # CLI glue: data-dir resolution, best-effort git, subcommands
 # --------------------------------------------------------------------------- #
 
@@ -1455,6 +1574,15 @@ def cmd_render(args) -> None:
     print(f"render: wrote report -> {report_out}", file=sys.stderr)
 
 
+def cmd_audit(args) -> None:
+    data_dir = resolve_data_dir(args.data_dir)
+    # Read-only on purpose: no collect, no git, nothing written. You should be
+    # able to run this against a store you're suspicious of without changing it.
+    print(audit_report(union_stores(data_dir),
+                       union_stores(data_dir, "usage"),
+                       union_stores(data_dir, "agents")), end="")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Quantify your Claude Code skill usage from session transcripts.")
@@ -1482,6 +1610,11 @@ def main():
     pr.add_argument("--json", action="store_true",
                     help="dump the unioned events as JSON instead of writing a MOC")
     pr.set_defaults(func=cmd_render)
+
+    pa = sub.add_parser("audit",
+                        help="cross-check the streams and print what disagrees")
+    pa.add_argument("--data-dir", default=None, help="private events repo (or $SKILL_MOC_DATA_DIR)")
+    pa.set_defaults(func=cmd_audit)
 
     args = ap.parse_args()
     args.func(args)

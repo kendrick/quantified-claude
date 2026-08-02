@@ -155,11 +155,15 @@ def test_agent_token_totals_fall_back_to_the_agents_own_usage_rows():
     assert cells[5] == "1.0k"
 
 
-def test_a_spawn_row_with_tokens_is_not_overridden_by_the_fallback():
+def test_the_agents_own_usage_rows_win_over_the_spawns_total():
+    # toolUseResult.totalTokens is the LAST message's usage, so it measures the
+    # context a run ended at rather than what it consumed. Preferring it would
+    # sum ending context sizes across spawns, which answers no question anyone
+    # has. The agent file's own rows are the cumulative number.
     spawns = [_spawn(total_tokens=42, agent_id="x")]
-    usage = [_usage(session="agent-x", tokens=(9999, 0, 0, 0))]
+    usage = [_usage(session="agent-x", tokens=(5000, 0, 0, 0))]
 
-    assert _cells(render_agent_types(spawns, usage), "Explore")[5] == "42"
+    assert _cells(render_agent_types(spawns, usage), "Explore")[5] == "5.0k"
 
 
 def test_agent_types_sums_lines_touched_from_tool_stats():
