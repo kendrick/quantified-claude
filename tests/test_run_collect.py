@@ -163,3 +163,89 @@ def test_a_session_that_yields_tokens_but_no_skill_events_still_writes_usage(tmp
     assert read_store(data_dir / "events" / "laptop.jsonl") == []
     (row,) = read_store(data_dir / "usage" / "laptop.jsonl")
     assert row["skill"] is None and row["messages"] == 1
+
+
+def _spawn_pair(tool_use_id="toolu_1", agent_id="agent-1", subagent_type="Explore"):
+    """A spawn's request and result, both seeded with a privacy sentinel."""
+    request = {
+        "type": "assistant",
+        "timestamp": "2026-06-17T10:00:00.000Z",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": tool_use_id, "name": "Agent",
+            "input": {"subagent_type": subagent_type,
+                      "prompt": "ACME-CLIENT migration",
+                      "description": "ACME-CLIENT audit"},
+        }]},
+    }
+    result = {
+        "type": "user",
+        "timestamp": "2026-06-17T10:05:00.000Z",
+        "toolUseResult": {"status": "completed", "agentId": agent_id,
+                          "agentType": subagent_type, "totalTokens": 5000,
+                          "prompt": "ACME-CLIENT brief"},
+        "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tool_use_id,
+            "content": "ACME-CLIENT summary"}]},
+    }
+    return request, result
+
+
+def test_one_collect_writes_the_agents_store_too(tmp_path):
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl", *_spawn_pair())
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    (row,) = read_store(data_dir / "agents" / "laptop.jsonl")
+    assert row["agent_id"] == "agent-1"
+    assert row["agent_type"] == "Explore"
+    assert row["session"] == "sess1"
+
+
+def test_the_written_agents_store_carries_no_prompt_text(tmp_path):
+    # The privacy check that matters, run against the bytes actually on disk
+    # rather than the in-memory rows. This store is a git repo that syncs between
+    # machines, so a leak here is durable.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl", *_spawn_pair())
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    written = (data_dir / "agents" / "laptop.jsonl").read_text(encoding="utf-8")
+    assert "ACME-CLIENT" not in written
+
+
+def test_a_subagents_own_transcript_contributes_no_spawn_rows(tmp_path):
+    # Spawns are recorded by the parent. Parsing them out of the agent file too
+    # would double-count every run that itself spawned nothing.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    request, result = _spawn_pair()
+    _write(transcripts / "-Users-me-repo" / "sess1.jsonl", request, result)
+    _write(transcripts / "-Users-me-repo" / "sess1" / "subagents" / "agent-1.jsonl",
+           _usage(skill="humanizer"))
+
+    run_collect(transcripts, data_dir, host="laptop")
+
+    rows = read_store(data_dir / "agents" / "laptop.jsonl")
+    assert [r["session"] for r in rows] == ["sess1"]
+
+
+def test_a_pruned_parents_spawn_rows_survive(tmp_path):
+    # Same retention contract as the other streams: the agentId link is meant to
+    # outlive both the parent transcript and the agent file it points at.
+    transcripts = tmp_path / "projects"
+    data_dir = tmp_path / "data"
+    _write(transcripts / "-Users-me-repo" / "old.jsonl",
+           *_spawn_pair(agent_id="agent-old"))
+    run_collect(transcripts, data_dir, host="laptop")
+
+    (transcripts / "-Users-me-repo" / "old.jsonl").unlink()
+    _write(transcripts / "-Users-me-repo" / "new.jsonl",
+           *_spawn_pair(agent_id="agent-new"))
+    run_collect(transcripts, data_dir, host="laptop")
+
+    rows = read_store(data_dir / "agents" / "laptop.jsonl")
+    assert {r["agent_id"] for r in rows} == {"agent-old", "agent-new"}
