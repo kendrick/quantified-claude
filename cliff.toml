@@ -28,13 +28,14 @@ commit_preprocessors = [
 ]
 
 commit_parsers = [
-  # PRs #13–#16 landed as merge commits titled like the branch commits under
-  # them, so skip those four to list each change once. PRs squash-merge from
-  # here on, which leaves one commit per PR and nothing to skip.
+  # PRs #13–#16 and #18 landed as merge commits titled like the branch commits
+  # under them, so skip those five to list each change once. PRs squash-merge
+  # from here on; add the SHA here if one slips through as a merge commit.
   { sha = "1d0c0f0b869da5873b437df20d21b1cf21e6b70c", skip = true },
   { sha = "a3fb23b43340cd21643400caf9a9454a504261bc", skip = true },
   { sha = "26a3c701669eaf5124f33ff3b20415ac6fb115b5", skip = true },
   { sha = "8beec1d932c8334a3772e1f0a1124b737f24e20b", skip = true },
+  { sha = "fd23cd15f7f67b256f91fe836539438448fef9a1", skip = true },
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
   { message = "^perf", group = "Performance" },
