@@ -390,7 +390,9 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
         for field in USAGE_TOKEN_KEYS:
             value = usage.get(field)
             bucket[field] += value if isinstance(value, int) else 0
-        # Lexicographic max works because these are ISO-8601 in a fixed format.
+        # String max holds because Claude Code only writes `Z` stamps. An hour
+        # mixing offsets could pick the wrong latest: `05:55-05:00` (10:55Z)
+        # sorts before `10:10Z`.
         if ts is not None and (bucket["timestamp"] is None or ts > bucket["timestamp"]):
             bucket["timestamp"] = ts
 
