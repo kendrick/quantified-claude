@@ -222,11 +222,28 @@ def test_two_spawns_in_one_session_produce_two_joined_rows():
     ]
 
 
-def test_tool_stats_passes_through_verbatim():
+def test_tool_stats_passes_new_counters_through():
     # The harness owns this counter map. Freezing its keys here would silently
-    # drop new ones on a version bump, so it's stored whole.
+    # drop new ones on a version bump, so unknown numeric keys are kept.
     stats = {"readCount": 3, "someFutureCounter": 99}
 
     (row,) = parse_spawns([_spawn_result(toolStats=stats)], session="s", host="h")
 
     assert row["tool_stats"] == stats
+
+
+def test_tool_stats_keeps_only_numeric_values():
+    # Unknown keys still pass through, but only as numbers: a string or nested
+    # map the harness adds later could carry a path or prompt text (§4).
+    stats = {"readCount": 3, "someFutureCounter": 99, "lastFile": "/ACME-CLIENT/plan.md",
+             "detail": {"note": "ACME-CLIENT"}, "flag": True}
+
+    (row,) = parse_spawns([_spawn_result(toolStats=stats)], session="s", host="h")
+
+    assert row["tool_stats"] == {"readCount": 3, "someFutureCounter": 99}
+
+
+def test_absent_tool_stats_stays_null():
+    (row,) = parse_spawns([_spawn_result()], session="s", host="h")
+
+    assert row["tool_stats"] is None

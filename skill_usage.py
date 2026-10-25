@@ -516,6 +516,13 @@ def _result_tool_use_id(record: dict) -> str | None:
     return None
 
 
+def _numeric_only(stats):
+    if not isinstance(stats, dict):
+        return stats
+    return {k: v for k, v in stats.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
 def parse_spawns(records, session: str, host: str, since: datetime | None = None):
     """
     Reduce one PARENT session's records into one row per subagent it spawned.
@@ -580,9 +587,9 @@ def parse_spawns(records, session: str, host: str, since: datetime | None = None
             "total_tokens": result.get("totalTokens"),
             "duration_ms": result.get("totalDurationMs"),
             "tool_use_count": result.get("totalToolUseCount"),
-            # Passed through verbatim: it's a small counter map the harness owns,
-            # and freezing its keys here would drop new ones on a version bump.
-            "tool_stats": result.get("toolStats"),
+            # Any key passes, so a new counter survives a version bump, but only
+            # numeric values: a string the harness adds here could carry a path (§4).
+            "tool_stats": _numeric_only(result.get("toolStats")),
             "cc_version": cc_version,
         })
     return rows
