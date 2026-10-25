@@ -13,6 +13,7 @@
 
 ### Documentation
 
+- **changelog:** regenerate to include the usage hour-bucket fix
 - **collect:** note the limits of the hour-bucket timestamp max and cite the row count
 - **working-memory:** document the hour field on usage rows
 - **changelog:** regenerate for module 2
