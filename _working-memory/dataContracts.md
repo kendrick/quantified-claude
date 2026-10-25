@@ -35,13 +35,14 @@ Source: `merge_events` and `parse_events` in `skill_usage.py`, plus `docs/plans/
 
 `usage/`, `agents/`, and `stats/` overlay-merge exactly like `events/`. Re-parsing a transcript replaces that session's rows in all four streams at once. Design doc §5 has the reasoning. The shapes below are what the parsers write.
 
-`usage/`, one row per transcript × model × skill, from `parse_usage`:
+`usage/`, one row per transcript × model × skill × UTC hour, from `parse_usage`:
 
 ```json
-{"session": "<file-stem>", "host": "mbp", "thread": "main", "model": "claude-opus-4-8", "skill": "humanizer", "messages": 42, "input_tokens": 1234, "output_tokens": 5678, "cache_creation_input_tokens": 90000, "cache_read_input_tokens": 400000, "timestamp": "<latest seen>", "cc_version": "2.1.209"}
+{"session": "<file-stem>", "host": "mbp", "thread": "main", "model": "claude-opus-4-8", "skill": "humanizer", "messages": 42, "input_tokens": 1234, "output_tokens": 5678, "cache_creation_input_tokens": 90000, "cache_read_input_tokens": 400000, "hour": "2026-06-17T14", "timestamp": "<latest seen in that hour>", "cc_version": "2.1.209"}
 ```
 
 - `skill`—the record's `attributionSkill`, or `null` when no skill claimed the message.
+- `hour`—the UTC hour as `YYYY-MM-DDTHH`, or `null` when the timestamp didn't parse. It's what puts tokens on the day they were spent (#12). Rows from sessions pruned before this change have no `hour` key and keep their single stamp, so readers use `.get("hour")`.
 - `messages`—the count of unique `message.id` values. Streaming can spread one message across as many as 24 records, each repeating the same usage block, so `parse_usage` counts each ID once.
 - The four token keys are `USAGE_TOKEN_KEYS`, named exactly as `message.usage` names them.
 - `model`—the raw ID. `short_model` shortens it at render time only.
