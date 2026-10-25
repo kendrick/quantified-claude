@@ -149,18 +149,20 @@ def test_missing_token_counters_default_to_zero():
     assert row["input_tokens"] == 10
 
 
-def test_row_timestamp_is_the_latest_seen_for_that_group():
-    # One row summarizes many messages, so its timestamp answers "when was this
-    # model last used for this skill" rather than when the group started.
+def test_row_timestamp_is_the_latest_seen_within_that_hour():
+    # One row now summarizes one hour of one model under one skill, so its
+    # timestamp is the last message inside that hour. Field meanings are added
+    # to, never repurposed (dataContracts), so `timestamp` keeps "latest seen".
     records = [
         _assistant(message_id="a", ts="2026-07-14T10:00:00.000Z"),
-        _assistant(message_id="b", ts="2026-07-14T18:30:00.000Z"),
-        _assistant(message_id="c", ts="2026-07-14T12:00:00.000Z"),
+        _assistant(message_id="b", ts="2026-07-14T10:45:00.000Z"),
+        _assistant(message_id="c", ts="2026-07-14T10:15:00.000Z"),
     ]
 
     (row,) = parse_usage(records, session="s", host="h")
 
-    assert row["timestamp"] == "2026-07-14T18:30:00.000Z"
+    assert row["hour"] == "2026-07-14T10"
+    assert row["timestamp"] == "2026-07-14T10:45:00.000Z"
 
 
 def test_since_drops_records_before_the_cutoff():
@@ -199,3 +201,90 @@ def test_main_thread_rows_gain_thread_and_nothing_else():
 
     assert row["thread"] == "main"
     assert "agent_type" not in row and "parent_session" not in row
+
+
+def test_tokens_land_in_the_hour_they_were_spent():
+    # Issue #12's reproduction. Before hour buckets, all 1,010 tokens landed on
+    # the 13th because the one row was stamped at the session's last message,
+    # and about a third of real token spend sat on the wrong day as a result.
+    records = [
+        _assistant(message_id="m1", ts="2026-09-10T09:00:00.000Z", tokens=(0, 1000, 0, 0)),
+        _assistant(message_id="m2", ts="2026-09-13T17:00:00.000Z", tokens=(0, 10, 0, 0)),
+    ]
+
+    rows = parse_usage(records, session="s1", host="h")
+
+    assert [(r["hour"], r["output_tokens"]) for r in rows] == [
+        ("2026-09-10T09", 1000),
+        ("2026-09-13T17", 10),
+    ]
+
+
+def test_splitting_by_hour_never_changes_the_totals():
+    # Every reader of usage/ sums rows with +=, which is why this is a parser
+    # change and not a rendering one. That only holds if the split is exact.
+    records = [
+        _assistant(model="claude-opus-5", skill="humanizer", message_id="a",
+                   ts="2026-07-14T09:10:00.000Z", tokens=(1, 2, 3, 4)),
+        _assistant(model="claude-opus-5", skill="humanizer", message_id="b",
+                   ts="2026-07-14T09:50:00.000Z", tokens=(5, 6, 7, 8)),
+        _assistant(model="claude-opus-5", skill="humanizer", message_id="c",
+                   ts="2026-07-14T11:00:00.000Z", tokens=(9, 10, 11, 12)),
+        _assistant(model="claude-haiku-4-5-20251001", skill=None, message_id="d",
+                   ts="2026-07-15T02:00:00.000Z", tokens=(13, 14, 15, 16)),
+    ]
+    fields = ("messages", "input_tokens", "output_tokens",
+              "cache_creation_input_tokens", "cache_read_input_tokens")
+
+    rows = parse_usage(records, session="s", host="h")
+
+    # Totals settled from the fixture, not from the parser.
+    assert {f: sum(r[f] for r in rows) for f in fields} == {
+        "messages": 4, "input_tokens": 28, "output_tokens": 32,
+        "cache_creation_input_tokens": 36, "cache_read_input_tokens": 40,
+    }
+    assert len(rows) == 3
+
+
+def test_messages_in_the_same_hour_share_one_row():
+    # Buckets come from observed records, so a busy hour is one row, not one
+    # per message. That's what keeps the store near 1.5x rather than the
+    # per-message size antipatterns.md rules out.
+    records = [
+        _assistant(message_id="a", ts="2026-07-14T10:00:00.000Z"),
+        _assistant(message_id="b", ts="2026-07-14T10:59:59.999Z"),
+    ]
+
+    (row,) = parse_usage(records, session="s", host="h")
+
+    assert row["messages"] == 2
+
+
+def test_an_unparseable_timestamp_keeps_its_tokens_in_a_null_hour():
+    # Same lenient posture as --since: a timestamp we can't read never costs
+    # us tokens we know were spent.
+    records = [
+        _assistant(message_id="a", ts="yesterday-ish", tokens=(0, 7, 0, 0)),
+        _assistant(message_id="b", ts="2026-07-14T10:00:00.000Z", tokens=(0, 5, 0, 0)),
+    ]
+
+    rows = parse_usage(records, session="s", host="h")
+
+    assert [(r["hour"], r["output_tokens"]) for r in rows] == [
+        (None, 7),
+        ("2026-07-14T10", 5),
+    ]
+
+
+def test_hour_is_normalized_to_utc():
+    # Real transcripts write a bare Z, but an offset timestamp must still land
+    # in the same hour bucket as its UTC equivalent or one hour splits in two.
+    records = [
+        _assistant(message_id="a", ts="2026-07-14T05:30:00.000-05:00"),
+        _assistant(message_id="b", ts="2026-07-14T10:10:00.000Z"),
+    ]
+
+    (row,) = parse_usage(records, session="s", host="h")
+
+    assert row["hour"] == "2026-07-14T10"
+    assert row["messages"] == 2
