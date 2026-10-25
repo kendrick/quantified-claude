@@ -14,6 +14,14 @@ Each entry follows this shape:
 **Alternatives considered:** What was rejected, and why.
 ```
 
+## 2026-10-25: Store only numeric values from `toolStats`
+
+**Source:** PR #14, plus a follow-up for non-map values
+
+**Context:** `parse_spawns` copied `toolUseResult.toolStats` whole. It was the one stored field not chosen by name, so a string Claude Code added there could carry a path or prompt fragment into the private store.
+**Decision:** Keep any key whose value is an int or float, and drop bools. A `toolStats` that isn't a map is stored as `null`. A new counter still survives a Claude Code release, which was the reason for passing the map through whole.
+**Alternatives considered:** An allowlist of named keys, which would drop each new counter until someone added it by hand.
+
 ## 2026-10-25: Key usage rows per UTC hour as well
 
 **Source:** issue #12, PR #15; the §4 addendum in `docs/plans/2026-07-14-agents-models-tokens-design.md`

@@ -541,8 +541,9 @@ def _result_tool_use_id(record: dict) -> str | None:
 
 
 def _numeric_only(stats):
+    # A non-map can't be filtered key by key, so it's dropped rather than stored.
     if not isinstance(stats, dict):
-        return stats
+        return None
     return {k: v for k, v in stats.items()
             if isinstance(v, (int, float)) and not isinstance(v, bool)}
 
