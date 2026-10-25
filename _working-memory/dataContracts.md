@@ -87,3 +87,7 @@ The `<unknown>` bucket is a tripwire, not a fallback to be quietly improved away
 ## The MOC (Output)
 
 Markdown with YAML frontmatter, written to `~/.claude/skills/skill-usage-moc.md` by default. Three sections: Used & Owned (a table), Owned but Never Used, and Used but Not in Your Skills Dir. It's derived, disposable, and regenerated in full on every render, so never edit it by hand and never merge it across machines.
+
+## The Usage Report (Output)
+
+Markdown with YAML frontmatter, written beside the MOC to `~/.claude/skills/claude-usage-report.md` by default (`--report-out` moves it). `render_report` builds five sections from `usage/`, `agents/`, and `events/`: Models × Thread, Agent Types, Tokens by Skill, Cache Economics, and Skills × Agents. A section whose stream is empty prints a note instead of raising, so a fresh host still renders. The report follows the MOC's rules: derived, regenerated in full on every render, never edited by hand, never synced.
