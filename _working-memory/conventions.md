@@ -14,7 +14,7 @@
 ## File Organization
 
 - One module. The whole tool is `skill_usage.py`, and the guard-rail is roughly 1,300 lines, past which rendering splits out. Until then, resist the urge to split for tidiness.
-- The module is divided by banner comments, each a full-width `# ---...--- #` rule with a title. The current sections are Locations, Transcript parsing, Skill inventory, MOC rendering, and CLI glue. New code goes inside an existing section or gets a new banner; don't just append to the bottom.
+- The module is divided by banner comments, each a full-width `# ---...--- #` rule with a title. The current sections are Locations, Transcript parsing, Skill inventory, MOC rendering, Report rendering, Audit, and CLI glue. New code goes inside an existing section or gets a new banner; don't just append to the bottom.
 - Tests live in `tests/`, one module per unit of behavior, named `test_<thing>.py` after the function or layer under test.
 - Design docs go in `docs/plans/` as `YYYY-MM-DD-<slug>-design.md`. They're the reasoning of record, and code comments, commit messages, and issues all cite them by section number (`§4`).
 
@@ -49,3 +49,5 @@ The comments here carry unusual weight and are worth reading before editing anyt
 ## Commits
 
 Conventional commits, enforced in spirit by `cliff.toml` (`filter_unconventional = true`, so anything that doesn't parse silently vanishes from the changelog). Use a scope where there is one: `feat(skill-usage):`, `fix(skill-usage):`. `chore`, `ci`, and `style` are dropped from the changelog by design. Subject lines are lowercase and imperative, and bodies explain why.
+
+PRs squash-merge, so the PR title becomes the one commit on `main` and has to follow the same rules. Regenerate `CHANGELOG.md` with `git cliff -o CHANGELOG.md` and never edit it by hand. A PR can't list itself, so regenerate in a separate commit after the PRs it should cover have merged.

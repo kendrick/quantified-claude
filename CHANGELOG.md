@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- **collect:** bucket usage rows by hour so tokens land when they were spent
 - **collect:** store only numeric values from toolStats
 - **collect:** pin the store's host key so it can't drift with the network
 - **skill-usage:** parse YAML block-scalar descriptions in frontmatter
@@ -12,6 +13,10 @@
 
 ### Documentation
 
+- **changelog:** regenerate to include the usage hour-bucket fix
+- **collect:** note the limits of the hour-bucket timestamp max and cite the row count
+- **working-memory:** document the hour field on usage rows
+- **changelog:** regenerate for module 2
 - **working-memory:** add the usage report to the output contracts
 - **working-memory:** document the usage, agents, and stats streams as built
 - rewrite the README around all four streams

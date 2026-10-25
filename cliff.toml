@@ -28,10 +28,13 @@ commit_preprocessors = [
 ]
 
 commit_parsers = [
-  # GitHub merge commits carry the PR title plus "(#N)", which duplicates the
-  # branch commit underneath. Earlier merges were titled "merge: ..." and fell
-  # out on their own; this catches the ones that weren't.
-  { message = '\(#\d+\)$', skip = true },
+  # PRs #13–#16 landed as merge commits titled like the branch commits under
+  # them, so skip those four to list each change once. PRs squash-merge from
+  # here on, which leaves one commit per PR and nothing to skip.
+  { sha = "1d0c0f0b869da5873b437df20d21b1cf21e6b70c", skip = true },
+  { sha = "a3fb23b43340cd21643400caf9a9454a504261bc", skip = true },
+  { sha = "26a3c701669eaf5124f33ff3b20415ac6fb115b5", skip = true },
+  { sha = "8beec1d932c8334a3772e1f0a1124b737f24e20b", skip = true },
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
   { message = "^perf", group = "Performance" },
