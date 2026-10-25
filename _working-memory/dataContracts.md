@@ -58,7 +58,7 @@ Source: `merge_events` and `parse_events` in `skill_usage.py`, plus `docs/plans/
 - About a seventh of real results, all async spawns, lack `agentType` and `totalTokens`. Treat this stream as enrichment, and take tokens and model from the agent's own transcript in `usage/`.
 - `agent_type`—`toolUseResult.agentType`, falling back to the spawn input's `subagent_type`. `requested_model` comes from the spawn input and `resolved_model` from the result. Each is `null` when its source is absent.
 - `status`—seen in real data as `completed`, `async_launched`, and `forked`.
-- `tool_stats`—copied whole from `toolUseResult.toolStats`. It's the one field not copied out key by key, so a new key Claude Code adds lands in the store unreviewed. Today every key is a count.
+- `tool_stats`—`toolUseResult.toolStats`, keeping only keys whose value is an int or float. A new counter survives a Claude Code release, while strings, nested maps, and bools are dropped. A missing or non-map `toolStats` is stored as `null`.
 
 `stats/`, one row per transcript file, from `parse_stats`:
 

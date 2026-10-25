@@ -247,3 +247,12 @@ def test_absent_tool_stats_stays_null():
     (row,) = parse_spawns([_spawn_result()], session="s", host="h")
 
     assert row["tool_stats"] is None
+
+
+def test_a_non_map_tool_stats_is_stored_as_null():
+    # The numeric filter only runs on a map. If the harness ever writes a bare
+    # string or a list here, it must not reach the store unfiltered (§4).
+    for stats in ("/ACME-CLIENT/plan.md", ["ACME-CLIENT"]):
+        (row,) = parse_spawns([_spawn_result(toolStats=stats)], session="s", host="h")
+
+        assert row["tool_stats"] is None
