@@ -14,6 +14,14 @@ Each entry follows this shape:
 **Alternatives considered:** What was rejected, and why.
 ```
 
+## 2026-10-25: Key usage rows per UTC hour as well
+
+**Source:** issue #12, PR #15; the §4 addendum in `docs/plans/2026-07-14-agents-models-tokens-design.md`
+
+**Context:** The 2026-07-14 entry held that aggregating per transcript lost only message ordering. It also lost when inside a session the tokens were spent. Every row was stamped at the session's last message, which put about a third of measured tokens on the wrong day.
+**Decision:** Rows are keyed per `(transcript, model, attributionSkill, UTC hour)` and carry an `hour` field. Totals don't change, because every reader sums rows. This supersedes the 2026-07-14 entry's claim about what aggregation loses, and the rest of that entry stands.
+**Alternatives considered:** Per-day buckets, at 1.07x the rows against 1.50x for hours, but coarser than the hour-level timestamps `events/` already carries. Per-message rows stay rejected (`antipatterns.md`).
+
 ## 2026-08-02: The tool and slash channels are disjoint, so summing them is correct
 
 **Source:** measured against the union events store (879 events, both hosts)
