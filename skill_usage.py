@@ -198,6 +198,23 @@ def _before_cutoff(ts: str | None, since: datetime) -> bool:
     return when < since
 
 
+def _utc_hour(ts: str | None) -> str | None:
+    """
+    The UTC hour a timestamp falls in, as `YYYY-MM-DDTHH`, or None when it
+    can't be parsed. Same Z swap as _before_cutoff for the 3.9 floor. A naive
+    timestamp is taken as UTC, since that's what Claude Code writes.
+    """
+    if not ts:
+        return None
+    try:
+        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return when.strftime("%Y-%m-%dT%H")
+
+
 def parse_events(records, session: str, host: str, since: datetime | None = None,
                  builtins=BUILTIN_CLI_COMMANDS, thread: str = "main"):
     """
@@ -313,7 +330,9 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
     naively inflates every number by that factor, so the first sighting of an id
     wins and the rest are skipped.
 
-    Rows are aggregates per (model, skill), not one row per message. The
+    Rows are aggregates per (model, skill, UTC hour), not one row per message.
+    The hour is what puts tokens on the day they were spent (#12); one stamp
+    per session put a multi-day session's whole spend on its last day. The
     session-keyed overlay recomputes a session's whole slice on every re-parse,
     so aggregating early costs no auditability while keeping the store small and
     its diffs readable (design doc §4).
@@ -361,7 +380,7 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
         # An id-less record can't be deduped, so it's counted. Double-counting a
         # rare malformed record beats dropping usage we know happened.
 
-        key = (model, record.get("attributionSkill"))
+        key = (model, record.get("attributionSkill"), _utc_hour(ts))
         bucket = buckets.get(key)
         if bucket is None:
             bucket = buckets[key] = dict.fromkeys(USAGE_TOKEN_KEYS, 0)
@@ -371,15 +390,19 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
         for field in USAGE_TOKEN_KEYS:
             value = usage.get(field)
             bucket[field] += value if isinstance(value, int) else 0
-        # Lexicographic max works because these are ISO-8601 in a fixed format.
+        # String max holds because Claude Code only writes `Z` stamps. An hour
+        # mixing offsets could pick the wrong latest: `05:55-05:00` (10:55Z)
+        # sorts before `10:10Z`.
         if ts is not None and (bucket["timestamp"] is None or ts > bucket["timestamp"]):
             bucket["timestamp"] = ts
 
     rows = []
-    # None sorts against str in 3.9 only if we coerce, and a null skill is the
-    # common case (most assistant turns aren't inside a skill).
-    for (model, skill) in sorted(buckets, key=lambda k: (k[0] or "", k[1] or "")):
-        bucket = buckets[(model, skill)]
+    # None doesn't sort against str, so coerce. A null skill is the common case
+    # (most assistant turns aren't inside a skill); a null hour is the rare
+    # unparseable timestamp.
+    for key in sorted(buckets, key=lambda k: tuple(part or "" for part in k)):
+        model, skill, hour = key
+        bucket = buckets[key]
         row = {
             "session": session,
             "host": host,
@@ -389,6 +412,7 @@ def parse_usage(records, session: str, host: str, thread: str = "main",
             "messages": bucket["messages"],
         }
         row.update({field: bucket[field] for field in USAGE_TOKEN_KEYS})
+        row["hour"] = hour
         row["timestamp"] = bucket["timestamp"]
         row["cc_version"] = cc_version
         if thread == "agent":
@@ -913,8 +937,8 @@ def run_render(data_dir: Path, out_path: Path, links: str = "relative",
     if since is not None:
         events = [e for e in events if not _before_cutoff(e.get("timestamp"), since)]
         # Same cutoff, same helper. A usage row's timestamp is the latest message
-        # in its group, so --since keeps a group that was still active on the
-        # boundary rather than splitting an aggregate nobody can split.
+        # in its hour, so --since keeps an hour that was still active at the
+        # cutoff rather than splitting an aggregate nobody can split.
         usage_rows = [r for r in usage_rows
                       if not _before_cutoff(r.get("timestamp"), since)]
     if inventory is None:

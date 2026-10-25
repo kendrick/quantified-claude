@@ -68,6 +68,8 @@ Aggregates also keep the git store diff-friendly: a new session lands as one to 
 
 **When rows are written.** On every collect: the daily launchd run and render's auto-collect both trigger it. A session that's still live gets its rows rewritten on the next collect (the overlay replaces the slice), converging the moment the transcript goes immutable. There's no double-count window, because there's no append seam, the same property module 1 relies on.
 
+**Addendum, 2026-10-25 (#12).** Aggregating per transcript lost more than message ordering. It also lost *when* within a session the tokens were spent, so a multi-day session landed all its tokens on its last day. The store can't recover that for old rows; only a transcript still inside `cleanupPeriodDays` can be re-parsed. Rows are now keyed per `(transcript, model, attributionSkill, UTC hour)`. That is about 1.5x the rows (3,592 became 5,391 across the 2,240 transcripts on disk, per #12), still far below the per-message store this section rejects.
+
 ---
 
 ## 5. Schemas
