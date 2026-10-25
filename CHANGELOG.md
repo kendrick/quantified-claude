@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- **collect:** store a non-map toolStats as null (#17)
 - **collect:** bucket usage rows by hour so tokens land when they were spent
 - **collect:** store only numeric values from toolStats
 - **collect:** pin the store's host key so it can't drift with the network
@@ -13,6 +14,7 @@
 
 ### Documentation
 
+- **working-memory:** record module 2 as built and the squash-merge workflow
 - **changelog:** regenerate to include the usage hour-bucket fix
 - **collect:** note the limits of the hour-bucket timestamp max and cite the row count
 - **working-memory:** document the hour field on usage rows
