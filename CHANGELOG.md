@@ -4,16 +4,36 @@
 
 ### Bug Fixes
 
+- **collect:** store only numeric values from toolStats
+- **collect:** pin the store's host key so it can't drift with the network
 - **skill-usage:** parse YAML block-scalar descriptions in frontmatter
 - **skill-usage:** canonicalize namespaced skill ids in the render join
 - **skill-usage:** follow symlinked skill dirs in the inventory scan
 
 ### Documentation
 
+- **working-memory:** add the usage report to the output contracts
+- **working-memory:** document the usage, agents, and stats streams as built
+- rewrite the README around all four streams
+- license the repo and write down what a contributor can't infer
+- **working-memory:** settle the tool-vs-slash disjointness question
+- **working-memory:** hydrate the six shared files
+- design for module 2 (agents, models, tokens)
+- title-case the README section headings
 - add README
 
 ### Features
 
+- **audit:** add a read-only audit subcommand cross-checking the streams
+- **render:** add tokens by skill, cache economics, and skills by agent
+- **render:** add the usage report with Models × Thread and Agent Types [BREAKING]
+- **render:** add a Tokens column and stop counting agent runs as sessions
+- **collect:** add the session-stats stream and stamp cc_version everywhere
+- **collect:** record one row per subagent run
+- **collect:** record token usage per model and skill
+- **collect:** tag events with the thread that produced them
+- ship the macOS launchd scheduling template and installer
+- **skill-usage:** title-case the MOC section headings
 - **skill-usage:** render channel columns and links, wire the collect/render CLI
 - **skill-usage:** compose the collect data flow in run_collect
 - **skill-usage:** add the events-store persistence and aggregation layer
